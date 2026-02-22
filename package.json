@@ -9,6 +9,7 @@
     "start": "next start",
     "lint": "eslint .",
     "test": "vitest run",
+    "tests": "vitest run",
     "seed": "psql \"$DATABASE_URL\" -f db/seed/seed.sql",
     "test:watch": "vitest"
   },

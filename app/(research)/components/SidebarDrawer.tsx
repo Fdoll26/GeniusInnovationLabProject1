@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { signOut, useSession } from 'next-auth/react';
 import { usePathname, useRouter } from 'next/navigation';
 import { createPortal } from 'react-dom';
@@ -12,16 +12,6 @@ type SessionListItem = {
   updated_at: string;
 };
 
-const statusLabel: Record<string, string> = {
-  draft: 'Draft',
-  refining: 'Needs clarifications',
-  running_research: 'Waiting on research results',
-  aggregating: 'Aggregating results',
-  completed: 'Completed',
-  partial: 'Partial',
-  failed: 'Failed'
-};
-
 function formatRelative(iso: string) {
   const now = Date.now();
   const then = new Date(iso).getTime();
@@ -29,18 +19,18 @@ function formatRelative(iso: string) {
 
   const minutes = Math.floor(diffMs / 60000);
   if (minutes < 60) {
-    return `${minutes}m ago`;
+    return `${minutes}m`;
   }
   const hours = Math.floor(minutes / 60);
   if (hours < 24) {
-    return `${hours}h ago`;
+    return `${hours}h`;
   }
   const days = Math.floor(hours / 24);
   if (days < 7) {
-    return `${days}d ago`;
+    return `${days}d`;
   }
   const months = Math.floor(days / 30);
-  return `${Math.max(1, months)}mo ago`;
+  return `${Math.max(1, months)}mo`;
 }
 
 function classNames(...values: Array<string | false | null | undefined>) {
@@ -62,6 +52,7 @@ export default function SidebarDrawer({
   const [recentLoading, setRecentLoading] = useState(false);
   const [recentError, setRecentError] = useState<string | null>(null);
   const [mounted, setMounted] = useState(false);
+  const recentInFlightRef = useRef(false);
 
   const isAuthed = Boolean(session?.user?.email);
   const avatar = session?.user?.image ?? null;
@@ -91,10 +82,13 @@ export default function SidebarDrawer({
   }, [open, onClose]);
 
   useEffect(() => {
-    if (!open || !recentOpen || recentLoading || recent.length > 0) {
+    if (!open || !recentOpen) {
       return;
     }
-    let active = true;
+    if (recentInFlightRef.current) {
+      return;
+    }
+    recentInFlightRef.current = true;
     setRecentLoading(true);
     setRecentError(null);
     const controller = new AbortController();
@@ -102,26 +96,20 @@ export default function SidebarDrawer({
     fetch('/api/research/sessions/recent?limit=5', { signal: controller.signal })
       .then((r) => (r.ok ? r.json() : r.text().then((t) => Promise.reject(new Error(t || 'Request failed')))))
       .then((data) => {
-        if (!active) {
-          return;
-        }
-        setRecent(Array.isArray(data) ? (data as SessionListItem[]) : []);
+        const next = Array.isArray(data) ? (data as SessionListItem[]) : [];
+        setRecent(next);
       })
       .catch((err) => {
-        if (!active) return;
-        setRecentError(err instanceof Error ? err.message : 'Failed to load recent sessions');
+        const message = err instanceof Error ? err.message : 'Failed to load recent sessions';
+        setRecentError(message);
       })
       .finally(() => {
         clearTimeout(timer);
-        controller.abort();
-        if (active) {
-          setRecentLoading(false);
-        }
+        recentInFlightRef.current = false;
+        setRecentLoading(false);
       });
-    return () => {
-      active = false;
-    };
-  }, [open, recentOpen, recentLoading, recent.length]);
+    return () => controller.abort();
+  }, [open, recentOpen]);
 
   if (!isAuthed) {
     return null;
@@ -233,10 +221,12 @@ export default function SidebarDrawer({
                     <span className="drawer__recent-title truncate">{item.topic}</span>
                   </div>
                   <div className="drawer__recent-bottom">
-                    <small className="muted">{formatRelative(item.updated_at)}</small>
-                    <small className="drawer__status">
-                      {statusLabel[item.state] ?? item.state}
-                    </small>
+                    <div className="drawer__recent-bottom-left">
+                      <small className="muted">{formatRelative(item.updated_at)}</small>
+                    </div>
+                    <div className="drawer__recent-bottom-right">
+                      <small className="drawer__status">{item.state}</small>
+                    </div>
                   </div>
                 </button>
               ))}

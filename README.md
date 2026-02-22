@@ -6,12 +6,10 @@ session history, and emails a PDF report upon completion.
 ## Setup
 
 1. Copy `.env.example` to `.env.local` and fill in values.
-2. Run the SQL migrations against your PostgreSQL instance:
-   - `db/migrations/001_init.sql`
-   - `db/migrations/002_rate_limit.sql`
-   - `db/migrations/003_user_settings.sql`
-   - `db/migrations/004_user_settings_theme.sql`
-   - `db/migrations/005_provider_results_external.sql`
+2. Initialize (or update) your PostgreSQL schema:
+   - `psql "$DATABASE_URL" -f db/init.sql`
+3. (Optional) Load dummy seed data for local dev:
+   - `psql "$DATABASE_URL" -f db/seed/seed.sql`
 3. Install dependencies and start the dev server.
 
 ## Flow

@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import HistoryList from '../components/HistoryList';
-import SessionDetail from '../components/SessionDetail';
 import { useRouter, useSearchParams } from 'next/navigation';
+import HistoryList from './HistoryList';
+import SessionDetail from './SessionDetail';
 
 export default function HistoryPageClient() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -42,3 +42,4 @@ export default function HistoryPageClient() {
     </div>
   );
 }
+

@@ -1,14 +1,14 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useSession } from 'next-auth/react';
+import { signIn, useSession } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import TopicForm from './components/TopicForm';
-import SessionStatus from './components/SessionStatus';
-import RefinementPanel from './components/RefinementPanel';
-import DebugPanel from './components/DebugPanel';
-import ActiveSessionTabs, { type ActiveSession } from './components/ActiveSessionTabs';
-import { restoreActiveSessions, type SessionListRecord } from './lib/active-sessions';
+import TopicForm from './TopicForm';
+import SessionStatus from './SessionStatus';
+import RefinementPanel from './RefinementPanel';
+import DebugPanel from './DebugPanel';
+import ActiveSessionTabs, { type ActiveSession } from './ActiveSessionTabs';
+import { restoreActiveSessions, type SessionListRecord } from '../lib/active-sessions';
 
 function storageKey(email: string | null) {
   return `activeSessions:${email ?? 'dev'}`;
@@ -38,7 +38,7 @@ export default function HomePageClient() {
     } catch {
       // ignore
     }
-  }, [activeSessions]);
+  }, [activeSessions, session?.user?.email]);
 
   useEffect(() => {
     activeSessionIdRef.current = activeSessionId;
@@ -52,7 +52,7 @@ export default function HomePageClient() {
     } catch {
       // ignore
     }
-  }, [activeSessionId]);
+  }, [activeSessionId, session?.user?.email]);
 
   useEffect(() => {
     if (restoredRef.current) {
@@ -159,12 +159,23 @@ export default function HomePageClient() {
 
   if (!session && !debugBypass) {
     return (
-      <div className="stack">
-        <h1>Start a new research session</h1>
-        <p className="muted">
-          Sign in with Google to run research, generate a PDF report, and email it to yourself.
-        </p>
-        <DebugPanel onBypassChange={setDebugBypass} />
+      <div className="auth-shell">
+        <div className="card auth-card stack">
+          <h1>Multi-API Research</h1>
+          <p className="muted">
+            Sign in to run deep research across OpenAI + Gemini, generate a PDF report, and email it to yourself.
+          </p>
+          <ul className="auth-bullets">
+            <li>Prompt refinement before research</li>
+            <li>OpenAI + Gemini results side-by-side</li>
+            <li>History + retries for failed runs</li>
+          </ul>
+          <button type="button" className="auth-button" onClick={() => signIn('google')}>
+            Continue with Google
+          </button>
+          <small className="muted">Your sessions are stored privately and associated with your Google account.</small>
+          <DebugPanel onBypassChange={setDebugBypass} />
+        </div>
       </div>
     );
   }
@@ -214,3 +225,4 @@ export default function HomePageClient() {
     </div>
   );
 }
+

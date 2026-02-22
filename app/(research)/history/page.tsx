@@ -1,6 +1,6 @@
-export const dynamic = 'force-dynamic';
+import HistoryPageClient from '../components/HistoryPageClient';
 
-import HistoryPageClient from './HistoryPageClient';
+export const dynamic = 'force-dynamic';
 
 export default function HistoryPage() {
   return <HistoryPageClient />;

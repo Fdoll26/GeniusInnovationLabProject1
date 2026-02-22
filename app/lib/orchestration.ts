@@ -1,4 +1,4 @@
-import { getResponseOutputText, getResponseSources, pollDeepResearch, runResearch, startRefinement, rewritePrompt, summarizeForReport } from './openai-client';
+import { getResponseOutputText, getResponseSources, pollDeepResearch, resumeDeepResearch, runResearch, startRefinement, rewritePrompt, summarizeForReport } from './openai-client';
 import { runGemini, rewritePromptGemini, startRefinementGemini, summarizeForReportGemini } from './gemini-client';
 import { createQuestions, getNextQuestion, listQuestions } from './refinement-repo';
 import { updateSessionState, getSessionById } from './session-repo';

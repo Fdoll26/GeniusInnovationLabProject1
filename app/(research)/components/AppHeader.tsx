@@ -1,7 +1,7 @@
 'use client';
 
 import Link from 'next/link';
-import { signIn, useSession } from 'next-auth/react';
+import { useSession } from 'next-auth/react';
 import { useEffect, useMemo, useState } from 'react';
 import SidebarDrawer from './SidebarDrawer';
 
@@ -18,7 +18,7 @@ function classNames(...values: Array<string | false | null | undefined>) {
 }
 
 export default function AppHeader() {
-  const { data: session, status } = useSession();
+  const { data: session } = useSession();
   const [debugBypass, setDebugBypass] = useState(false);
   const [drawerOpen, setDrawerOpen] = useState(false);
 
@@ -51,12 +51,6 @@ export default function AppHeader() {
 
         <div className="app-header__right">
           {debugBypass ? <span className="pill pill--warn">Dev bypass</span> : null}
-
-          {!session && !debugBypass ? (
-            <button type="button" onClick={() => signIn('google')} disabled={status === 'loading'}>
-              Sign in with Google
-            </button>
-          ) : null}
         </div>
       </div>
       {isAuthed ? <SidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} /> : null}

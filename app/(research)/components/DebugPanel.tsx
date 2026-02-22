@@ -33,7 +33,10 @@ export default function DebugPanel({
 }: {
   onBypassChange?: (enabled: boolean) => void;
 }) {
-  if (process.env.NODE_ENV === 'production') {
+  const enabled =
+    process.env.NEXT_PUBLIC_DEBUG_PANEL === '1' ||
+    process.env.NEXT_PUBLIC_DEBUG_PANEL === 'true';
+  if (process.env.NODE_ENV === 'production' || !enabled) {
     return null;
   }
   const [open, setOpen] = useState(false);

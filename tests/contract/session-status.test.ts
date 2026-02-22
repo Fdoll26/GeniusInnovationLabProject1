@@ -18,11 +18,11 @@ vi.mock('../../app/lib/provider-repo', () => ({
   listProviderResults: vi.fn(async () => [])
 }));
 
-import { GET } from '../../app/api/research/sessions/[sessionId]/status/route';
+import { GET } from '../../app/api/research/sessions/[sessionId]/[action]/route';
 
 describe('GET /api/research/sessions/:id/status', () => {
   it('returns status', async () => {
-    const response = await GET(new Request('http://localhost'), { params: { sessionId: 's1' } });
+    const response = await GET(new Request('http://localhost'), { params: { sessionId: 's1', action: 'status' } });
     expect(response.status).toBe(200);
   });
 });

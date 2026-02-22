@@ -31,7 +31,7 @@
   --brand-soft: rgba(139, 92, 246, 0.14);
   --warn-soft: rgba(245, 158, 11, 0.12);
   --warn-ink: #fbbf24;
-  --shadow: 0 18px 44px rgba(0, 0, 0, 0.35);
+  --shadow: none;
   --button-bg: var(--brand);
   --button-fg: #ffffff;
 }
@@ -56,6 +56,36 @@ main {
   max-width: 960px;
   margin: 0 auto;
   padding: 24px;
+}
+
+.auth-shell {
+  min-height: calc(100dvh - 120px);
+  display: grid;
+  place-items: center;
+  padding: 24px 0 44px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 520px;
+}
+
+.auth-bullets {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted);
+  display: grid;
+  gap: 6px;
+}
+
+.auth-button {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px 14px;
+  font-weight: 700;
 }
 
 input,
@@ -103,6 +133,21 @@ textarea {
   background: var(--card);
 }
 
+input[type='checkbox'],
+input[type='radio'] {
+  width: auto;
+  padding: 0;
+}
+
+select {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  background: var(--card);
+  color: var(--text);
+}
+
 textarea {
   resize: vertical;
   min-height: 96px;
@@ -116,6 +161,10 @@ button {
   border-radius: 12px;
   padding: 10px 14px;
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.05);
+}
+
+:root[data-theme='dark'] button {
+  box-shadow: none;
 }
 
 button:active:not(:disabled) {
@@ -164,6 +213,21 @@ button:disabled {
   grid-template-columns: minmax(0, 1fr) 220px;
   gap: 14px;
   align-items: start;
+}
+
+.two-col--equal {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.settings__checkbox {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.settings__checkbox input {
+  margin: 0;
 }
 
 .session-tabs {
@@ -470,6 +534,21 @@ button:disabled {
   justify-content: space-between;
   gap: 10px;
   margin-top: 6px;
+}
+
+.drawer__recent-bottom-left,
+.drawer__recent-bottom-right {
+  flex: 1;
+  min-width: 0;
+}
+
+.drawer__recent-bottom-left {
+  text-align: center;
+}
+
+.drawer__recent-bottom-right {
+  display: flex;
+  justify-content: flex-end;
 }
 
 .drawer__status {

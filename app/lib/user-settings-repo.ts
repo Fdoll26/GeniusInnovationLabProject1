@@ -154,11 +154,11 @@ export async function upsertUserSettings(userId: string, update: UserSettingsUpd
     return rows[0];
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    if (msg.toLowerCase().includes('user_settings') && msg.toLowerCase().includes('does not exist')) {
-      throw new Error('User settings table missing. Run db/migrations/003_user_settings.sql.');
-    }
     if (msg.toLowerCase().includes('column') && msg.toLowerCase().includes('theme') && msg.toLowerCase().includes('does not exist')) {
       throw new Error('User settings theme column missing. Run db/migrations/004_user_settings_theme.sql.');
+    }
+    if (msg.toLowerCase().includes('user_settings') && msg.toLowerCase().includes('does not exist')) {
+      throw new Error('User settings table missing. Run db/migrations/003_user_settings.sql.');
     }
     throw error;
   }

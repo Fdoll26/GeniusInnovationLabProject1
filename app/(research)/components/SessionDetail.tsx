@@ -164,20 +164,6 @@ export default function SessionDetail({
 
       window.location.assign(`/?session=${encodeURIComponent(detail.session.id)}`);
       return;
-
-      // Refresh/poll so the user sees progress when resuming finalization.
-      const startedAt = Date.now();
-      while (Date.now() - startedAt < 25_000) {
-        const refreshed = await fetch(`/api/research/sessions/${detail.session.id}`);
-        if (refreshed.ok) {
-          const data = (await refreshed.json()) as SessionDetail;
-          setDetail(data);
-          if (data.session.state !== 'aggregating') {
-            break;
-          }
-        }
-        await new Promise((r) => setTimeout(r, 1500));
-      }
     } catch (err) {
       setRetryError(err instanceof Error ? err.message : 'Retry failed');
     } finally {
@@ -186,16 +172,21 @@ export default function SessionDetail({
   }
 
   async function regenerateReport() {
+    if (!detail) {
+      return;
+    }
+    const currentSessionId = detail.session.id;
+
     setRegenStatus('running');
     setRegenError(null);
     try {
-      const response = await fetch(`/api/research/sessions/${detail.session.id}/regenerate-report`, { method: 'POST' });
+      const response = await fetch(`/api/research/sessions/${currentSessionId}/regenerate-report`, { method: 'POST' });
       if (!response.ok) {
         throw new Error(await response.text());
       }
       setRegenStatus('success');
       // Refresh detail to reflect any updated report metadata.
-      const refreshed = await fetch(`/api/research/sessions/${detail.session.id}`);
+      const refreshed = await fetch(`/api/research/sessions/${currentSessionId}`);
       if (refreshed.ok) {
         setDetail((await refreshed.json()) as SessionDetail);
       }
