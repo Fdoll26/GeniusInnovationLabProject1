@@ -13,10 +13,7 @@ Thumbs.db
 .vscode/
 .idea/
 coverage/
-"Remaining Work.txt"
-"errors.txt"
-"Conversation Context.txt"
-"Otherinfo.txt"
+Text/
 .codex
 tests/research_enabled.py
 tests/openai_deep_research_smoketest.py
