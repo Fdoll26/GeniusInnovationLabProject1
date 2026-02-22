@@ -1,0 +1,35 @@
+Remaining Work:
+
+ - Complete page styling and make it look nice
+ - Update request bars (clarifications and such, for clarifications only spin when waiting on OpenAI response, not when user should input answer, also clean up the blocking if waiting on OpenAI)
+ - Create stronger security of who can access the app (verified users, new user requests to join? Also reduce calls to the database and to the API keys, also try to ensure no SQL injection and LLM manipulation, maybe even do character limits?)
+ - Create database viewer and admin panels for the app?
+ - Get stronger history viewer in the app (List of previous research sessions with timestamps and status. Show recent 10 and button to load in more if the user wants to, which then requests the next 10 after wards until all is displayed. Once all history is displayed then show more button should not exist. If user clicks on history then a pop up containing detailed information of it [if it failed why, if succeeded then where was it sent to, show the indepth date time stamp where as the regular viewer only shows date, also show the initial prompt that was used])
+ - Using enter key to submit for the text fields, but also before sending the revised prompt into deep research there is pop up to confirm?
+ - Report styling (images, colors, blocks and indication of what things are, right now all text is the same size and font and style)
+ - Report formatting (is the current format okay, I think it could use a revamp)
+ - Need to have report summary that includes top insights into both models and sources found for each (can do a 1 or 2 and below have the source?)
+ - Ensure that the app is mobile friendly (UI and UX changes that affect how its viewed and used from laptop to tablet to phone)
+ - Ensure that Vercel can launch the webapp and we can use it (and ensure that there is no abuse of the limited API keys)
+ - Show the user thats logged in (google icon and email address) and have the ability to switch to another account?
+ - I want to have a toggle to show the steps of the research if it is possible to do so to the user, like what is gemini doing now sort of deal
+ 
+ 
+ 
+ - Update page styling and make it look really nice (figure out what this means and define page transitions and what I want)
+ 	 - To make the app mobile friendly and laptop friendly, when the user is signed in have a button (icon of three horizontal lines laid out vertically with spaces between them) that when pressed puts a shade on the screen (fades in) and then transition from the left brings out a side bar that contains buttons: "New Research Subject", "Historical Results", "Recent Results", "Google user icon", "Sign out". So the buttons "New Research Subject" and "Historical Results" just bring the user to that page (put some indication which one is the current page and if they click it) and clicking on one just pulls back the side bar and removes the shade. Clicking on Recent Results shows the most 5 recent results inside of the side bar just below the button (the button is a toggle that then displays a list, each item has three things: 1. Top aligned left is the Question (put ... after a certain amount of text), 2. Bottom aligned left is how long ago it most recent update (if below an hour show minutes, if below a day show hours, if below a week show days, if below a week show months), 3. Bottom aligned right is the most recent status.), clicking the button again will hide the list. The sign out button signs out the user and returns them to the sign in page.
+ - Fix the reports sources and ensuring that there is a sources section and it goes through each section and finds source links, saves the link to a list, and then replaces all occurrences of that link with the position in the list + 1 (so position 0 returns 1). I want to take in the output from the deep research and take all of the links out of the text and place them below in the format of [XX] *Source link* *Access date and time*
+ 	 
+ 	 
+ - Update the reports and how the structure is laid out, 
+ 
+ - Update request bars (clarifications and such, for clarifications only spin when waiting on OpenAI response, not when user should input answer, also clean up the blocking if waiting on OpenAI)
+ - Get stronger history viewer in the app (List of previous research sessions with timestamps and status. Show recent 10 and button to load in more if the user wants to, which then requests the next 10 after wards until all is displayed. Once all history is displayed then show more button should not exist. If user clicks on history then a pop up containing detailed information of it [if it failed why, if succeeded then where was it sent to, show the indepth date time stamp where as the regular viewer only shows date, also show the initial prompt that was used])
+ - Report styling (images, colors, blocks and indication of what things are, right now all text is the same size and font and style)
+ - Report formatting (is the current format okay, I think it could use a revamp)
+ - Need to have report summary that includes top insights into both models and sources found for each (can do a 1 or 2 and below have the source?)
+ - Ensure that the app is mobile friendly (UI and UX changes that affect how its viewed and used from laptop to tablet to phone)
+ - Show the user thats logged in (google icon and email address) and have the ability to switch to another account?
+ - I want to have a toggle to show the steps of the research if it is possible to do so to the user, like what is gemini doing now sort of deal
+ 
+ 

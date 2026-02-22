@@ -1,0 +1,36 @@
+{
+  "name": "multi-api-test-ground",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "seed": "psql \"$DATABASE_URL\" -f db/seed/seed.sql",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "next": "^16.1.6",
+    "next-auth": "^4.24.13",
+    "pdf-lib": "1.17.1",
+    "pg": "8.12.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "6.4.2",
+    "@testing-library/react": "14.2.2",
+    "@testing-library/user-event": "14.5.2",
+    "@types/node": "20.14.9",
+    "@types/react": "18.2.64",
+    "@types/react-dom": "18.2.21",
+    "eslint": "^10.0.0",
+    "eslint-config-next": "^0.2.4",
+    "jsdom": "24.0.0",
+    "typescript": "5.4.5",
+    "vitest": "^4.0.18"
+  }
+}

@@ -1,0 +1,105 @@
+import { query } from './db';
+
+export type ProviderResultRecord = {
+  id: string;
+  session_id: string;
+  provider: string;
+  status: string;
+  output_text: string | null;
+  sources_json: unknown | null;
+  started_at: string | null;
+  completed_at: string | null;
+  error_code: string | null;
+  error_message: string | null;
+  external_id?: string | null;
+  external_status?: string | null;
+  last_polled_at?: string | null;
+};
+
+export async function upsertProviderResult(params: {
+  sessionId: string;
+  provider: 'openai' | 'gemini';
+  status: string;
+  outputText?: string | null;
+  sources?: unknown | null;
+  errorCode?: string | null;
+  errorMessage?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  externalId?: string | null;
+  externalStatus?: string | null;
+  lastPolledAt?: string | null;
+}) {
+  try {
+    await query(
+      `INSERT INTO provider_results
+       (session_id, provider, status, output_text, sources_json, error_code, error_message, started_at, completed_at, external_id, external_status, last_polled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       ON CONFLICT (session_id, provider)
+       DO UPDATE SET
+         status = EXCLUDED.status,
+         output_text = COALESCE(EXCLUDED.output_text, provider_results.output_text),
+         sources_json = COALESCE(EXCLUDED.sources_json, provider_results.sources_json),
+         error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
+         error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
+         started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
+         completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at),
+         external_id = COALESCE(EXCLUDED.external_id, provider_results.external_id),
+         external_status = COALESCE(EXCLUDED.external_status, provider_results.external_status),
+         last_polled_at = COALESCE(EXCLUDED.last_polled_at, provider_results.last_polled_at)`,
+      [
+        params.sessionId,
+        params.provider,
+        params.status,
+        params.outputText ?? null,
+        params.sources ?? null,
+        params.errorCode ?? null,
+        params.errorMessage ?? null,
+        params.startedAt ?? null,
+        params.completedAt ?? null,
+        params.externalId ?? null,
+        params.externalStatus ?? null,
+        params.lastPolledAt ?? null
+      ]
+    );
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    const lower = msg.toLowerCase();
+    if (lower.includes('external_id') && lower.includes('does not exist')) {
+      await query(
+        `INSERT INTO provider_results
+         (session_id, provider, status, output_text, sources_json, error_code, error_message, started_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (session_id, provider)
+         DO UPDATE SET
+           status = EXCLUDED.status,
+           output_text = COALESCE(EXCLUDED.output_text, provider_results.output_text),
+           sources_json = COALESCE(EXCLUDED.sources_json, provider_results.sources_json),
+           error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
+           error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
+           started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
+           completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at)`,
+        [
+          params.sessionId,
+          params.provider,
+          params.status,
+          params.outputText ?? null,
+          params.sources ?? null,
+          params.errorCode ?? null,
+          params.errorMessage ?? null,
+          params.startedAt ?? null,
+          params.completedAt ?? null
+        ]
+      );
+      return;
+    }
+    throw error;
+  }
+}
+
+export async function listProviderResults(sessionId: string): Promise<ProviderResultRecord[]> {
+  return query<ProviderResultRecord>(
+    'SELECT * FROM provider_results WHERE session_id = $1 ORDER BY provider',
+    [sessionId]
+  );
+}

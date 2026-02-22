@@ -1,0 +1,220 @@
+openapi: 3.0.3
+info:
+  title: Multi-API Research API
+  version: 1.0.0
+servers:
+  - url: /api
+paths:
+  /research/sessions:
+    post:
+      summary: Create a research session
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SessionCreateRequest'
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+    get:
+      summary: List research sessions
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SessionListItem'
+  /research/sessions/{sessionId}:
+    get:
+      summary: Get session detail
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionDetail'
+  /research/sessions/{sessionId}/status:
+    get:
+      summary: Get session status
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatus'
+  /research/sessions/{sessionId}/refinement/answer:
+    post:
+      summary: Submit refinement answer
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefinementAnswerRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RefinementAnswerResponse'
+  /research/sessions/{sessionId}/approve:
+    post:
+      summary: Approve refined prompt
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatus'
+  /research/sessions/{sessionId}/retry:
+    post:
+      summary: Retry failed step
+      parameters:
+        - $ref: '#/components/parameters/SessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RetryRequest'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SessionStatus'
+components:
+  parameters:
+    SessionId:
+      name: sessionId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    SessionCreateRequest:
+      type: object
+      required: [topic]
+      properties:
+        topic:
+          type: string
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+        topic:
+          type: string
+        refinedPrompt:
+          type: string
+          nullable: true
+        state:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    SessionListItem:
+      type: object
+      properties:
+        id:
+          type: string
+        topic:
+          type: string
+        state:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+    SessionDetail:
+      type: object
+      properties:
+        session:
+          $ref: '#/components/schemas/Session'
+        refinementQuestions:
+          type: array
+          items:
+            $ref: '#/components/schemas/RefinementQuestion'
+        providerResults:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProviderResult'
+        report:
+          $ref: '#/components/schemas/Report'
+    SessionStatus:
+      type: object
+      properties:
+        state:
+          type: string
+        updatedAt:
+          type: string
+          format: date-time
+    RefinementQuestion:
+      type: object
+      properties:
+        id:
+          type: string
+        sequence:
+          type: integer
+        questionText:
+          type: string
+        answerText:
+          type: string
+          nullable: true
+        isComplete:
+          type: boolean
+    RefinementAnswerRequest:
+      type: object
+      required: [questionId, answer]
+      properties:
+        questionId:
+          type: string
+        answer:
+          type: string
+    RefinementAnswerResponse:
+      type: object
+      properties:
+        nextQuestion:
+          $ref: '#/components/schemas/RefinementQuestion'
+        isFinal:
+          type: boolean
+    ProviderResult:
+      type: object
+      properties:
+        provider:
+          type: string
+        status:
+          type: string
+        outputText:
+          type: string
+          nullable: true
+        errorMessage:
+          type: string
+          nullable: true
+    Report:
+      type: object
+      properties:
+        summaryText:
+          type: string
+        emailStatus:
+          type: string

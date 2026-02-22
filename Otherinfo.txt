@@ -1,0 +1,3 @@
+Postgress spin up: psql "$DATABASE_URL" -f db/seed/seed.sql
+
+To fill in the postgress: npm run seed (Requires psql on your PATH and DATABASE_URL set.)

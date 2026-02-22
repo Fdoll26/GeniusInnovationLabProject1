@@ -1,0 +1,23 @@
+node_modules/
+.next/
+dist/
+build/
+*.log
+.env
+.env.local
+.env.*.local
+.DS_Store
+Thumbs.db
+*.tmp
+*.swp
+.vscode/
+.idea/
+coverage/
+"Remaining Work.txt"
+"errors.txt"
+"Conversation Context.txt"
+"Otherinfo.txt"
+.codex
+tests/research_enabled.py
+tests/openai_deep_research_smoketest.py
+tests/openai_deep_crude_trial.py
