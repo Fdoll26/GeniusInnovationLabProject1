@@ -38,7 +38,6 @@ session history, and emails a PDF report upon completion.
 
 ## Access Control & Rate Limits
 
-- `ALLOWED_EMAILS` can be a comma-separated list of emails allowed to use the app.
 - `RATE_LIMIT_WINDOW_SECONDS` and `RATE_LIMIT_MAX_REQUESTS` apply to session creation,
   prompt approval, and retries.
 

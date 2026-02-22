@@ -7,13 +7,6 @@ export async function requireSession() {
   const debug = await getDebugFlags();
   if (debug.bypassAuth) {
     const email = 'dev@example.com';
-    const allowed = (process.env.ALLOWED_EMAILS || '').trim();
-    if (allowed) {
-      const list = allowed.split(',').map((value) => value.trim());
-      if (!list.includes(email)) {
-        throw new Error('Access denied');
-      }
-    }
     await query(
       `INSERT INTO users (email, name)
        VALUES ($1, $2)
@@ -27,13 +20,6 @@ export async function requireSession() {
   const session = await getServerSession(authOptions);
   if (!session || !session.user?.email) {
     throw new Error('Unauthorized');
-  }
-  const allowed = (process.env.ALLOWED_EMAILS || '').trim();
-  if (allowed) {
-    const list = allowed.split(',').map((value) => value.trim());
-    if (!list.includes(session.user.email)) {
-      throw new Error('Access denied');
-    }
   }
   return session;
 }

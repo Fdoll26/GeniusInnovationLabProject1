@@ -172,7 +172,6 @@ Copy `.env.example` → `.env.local` and set required variables:
 - `SENDGRID_API_KEY`, `EMAIL_FROM`
 
 Optional / advanced:
-- `ALLOWED_EMAILS` (comma-separated allowlist; enforced for both real auth and dev-bypass)
 - `RATE_LIMIT_WINDOW_SECONDS`, `RATE_LIMIT_MAX_REQUESTS`
 - OpenAI tuning:
   - `OPENAI_API_BASE`, `OPENAI_REFINER_MODEL`, `OPENAI_DEEP_RESEARCH_MODEL`, `OPENAI_MAX_TOOL_CALLS`
@@ -284,5 +283,5 @@ Alternatives:
 - Add export formats (Markdown/HTML) in addition to PDF.
 
 ### Security
-- Enforce `ALLOWED_EMAILS` and add per-user quotas (beyond current rate-limit table).
+- Add per-user quotas (beyond current rate-limit table).
 - Encrypt or redact sensitive content in stored research outputs if needed for compliance.
