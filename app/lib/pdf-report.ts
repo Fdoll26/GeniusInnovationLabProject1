@@ -253,7 +253,50 @@ export async function buildPdfReport(
       }
       const words = paragraph.split(/\s+/);
       let line = '';
+
+      const splitLongToken = (token: string) => {
+        const parts: string[] = [];
+        let remaining = token;
+        while (remaining.length > 0) {
+          let lo = 1;
+          let hi = remaining.length;
+          let best = 1;
+          while (lo <= hi) {
+            const mid = Math.floor((lo + hi) / 2);
+            const chunk = remaining.slice(0, mid);
+            const w = activeFont.widthOfTextAtSize(chunk, fontSize);
+            if (w <= maxWidth) {
+              best = mid;
+              lo = mid + 1;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          parts.push(remaining.slice(0, best));
+          remaining = remaining.slice(best);
+        }
+        return parts;
+      };
+
       for (const word of words) {
+        const wordWidth = activeFont.widthOfTextAtSize(word, fontSize);
+        if (wordWidth > maxWidth) {
+          if (line) {
+            writeLine(line, { bold: options?.bold, size: fontSize, color: options?.color });
+            line = '';
+          }
+          const chunks = splitLongToken(word);
+          for (let i = 0; i < chunks.length; i++) {
+            const chunk = chunks[i] as string;
+            if (i === chunks.length - 1) {
+              line = chunk;
+            } else {
+              writeLine(chunk, { bold: options?.bold, size: fontSize, color: options?.color });
+            }
+          }
+          continue;
+        }
+
         const testLine = line ? `${line} ${word}` : word;
         const lineWidth = activeFont.widthOfTextAtSize(testLine, fontSize);
         if (lineWidth > maxWidth && line) {

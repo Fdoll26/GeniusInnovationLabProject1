@@ -548,15 +548,15 @@ async function startGeminiFromQueue(params: {
   settings: Awaited<ReturnType<typeof getUserSettings>>;
   opts?: { stub?: boolean; stubGemini?: boolean; skipGemini?: boolean };
 }) {
-  const nowIso = new Date().toISOString();
+  const startedIso = new Date().toISOString();
   if (params.opts?.skipGemini) {
     await upsertProviderResult({
       sessionId: params.sessionId,
       provider: 'gemini',
       status: 'skipped',
       outputText: 'Gemini run skipped (debug)',
-      completedAt: nowIso,
-      lastPolledAt: nowIso
+      completedAt: startedIso,
+      lastPolledAt: startedIso
     });
     return { sessionId: params.sessionId, terminal: true as const };
   }
@@ -565,8 +565,8 @@ async function startGeminiFromQueue(params: {
     sessionId: params.sessionId,
     provider: 'gemini',
     status: 'running',
-    startedAt: nowIso,
-    lastPolledAt: nowIso
+    startedAt: startedIso,
+    lastPolledAt: startedIso
   });
 
   try {
@@ -575,6 +575,7 @@ async function startGeminiFromQueue(params: {
       timeoutMs: params.settings.gemini_timeout_minutes * 60_000,
       maxSources: params.settings.max_sources
     });
+    const completedIso = new Date().toISOString();
     if (!geminiResult.outputText.trim()) {
       await upsertProviderResult({
         sessionId: params.sessionId,
@@ -582,8 +583,8 @@ async function startGeminiFromQueue(params: {
         status: 'failed',
         errorMessage: 'Gemini returned empty output',
         sources: geminiResult.sources ?? null,
-        completedAt: nowIso,
-        lastPolledAt: nowIso
+        completedAt: completedIso,
+        lastPolledAt: completedIso
       });
       return { sessionId: params.sessionId, terminal: true as const };
     }
@@ -593,19 +594,20 @@ async function startGeminiFromQueue(params: {
       status: 'completed',
       outputText: geminiResult.outputText,
       sources: geminiResult.sources ?? null,
-      completedAt: nowIso,
-      lastPolledAt: nowIso
+      completedAt: completedIso,
+      lastPolledAt: completedIso
     });
     return { sessionId: params.sessionId, terminal: true as const };
   } catch (error) {
     console.error('Gemini research failed', error);
+    const completedIso = new Date().toISOString();
     await upsertProviderResult({
       sessionId: params.sessionId,
       provider: 'gemini',
       status: 'failed',
       errorMessage: error instanceof Error ? error.message : 'Gemini error',
-      completedAt: nowIso,
-      lastPolledAt: nowIso
+      completedAt: completedIso,
+      lastPolledAt: completedIso
     });
     return { sessionId: params.sessionId, terminal: true as const };
   }

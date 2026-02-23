@@ -84,6 +84,13 @@ function getGeminiFinishInfo(data: unknown): { finishReason: string | null; fini
   return { finishReason, finishMessage };
 }
 
+function looksTruncated(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  const last = trimmed.slice(-1);
+  return !'.?!)]}"\''.includes(last);
+}
+
 type GeminiGroundingMetadata = {
   webSearchQueries?: string[];
   groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
@@ -267,35 +274,56 @@ export async function summarizeForReportGemini(
       ? 'None.'
       : input.references.map((ref) => `[${ref.n}] ${ref.title ? `${ref.title} — ` : ''}${ref.url}`).join('\n');
 
-  const data = await request(
-    `/models/${geminiModel}:generateContent`,
-    {
-      contents: [
-        {
-          role: 'user',
-          parts: [
-            {
-              text:
-                `Write a thorough summary of the following ${input.provider} research output.\n` +
-                `- Use neutral, factual language.\n` +
-                `- Aim for 2–4 paragraphs and complete sentences (do not cut off mid-sentence).\n` +
-                (includeRefs
-                  ? `- If you make a factual claim that is supported by a reference, add a citation like [3].\n` +
-                    `- Use ONLY the reference numbers provided below.\n` +
-                    `- Do NOT invent citations.\n`
-                  : `- Do NOT include citations.\n`) +
-                `- Do NOT include a title or bullet points.\n\n` +
-                `REFERENCES:\n${refsText}\n\n` +
-                `RESEARCH OUTPUT:\n${input.researchText.trim().slice(0, 12000)}`
-            }
-          ]
-        }
-      ],
-      generationConfig: { maxOutputTokens: 1200 }
-    },
-    { timeoutMs: opts?.timeoutMs }
-  );
-  return extractTextFromGemini(data).trim();
+  const basePrompt =
+    `Write a thorough summary of the following ${input.provider} research output.\n` +
+    `- Use neutral, factual language.\n` +
+    `- Aim for 2–4 paragraphs and complete sentences.\n` +
+    `- Do NOT cut off mid-sentence.\n` +
+    (includeRefs
+      ? `- If you make a factual claim that is supported by a reference, add a citation like [3].\n` +
+        `- Use ONLY the reference numbers provided below.\n` +
+        `- Do NOT invent citations.\n`
+      : `- Do NOT include citations.\n`) +
+    `- Do NOT include a title or bullet points.\n\n` +
+    `REFERENCES:\n${refsText}\n\n` +
+    `RESEARCH OUTPUT:\n${input.researchText.trim().slice(0, 12000)}`;
+
+  const call = async (prompt: string, maxOutputTokens: number) => {
+    const data = await request(
+      `/models/${geminiModel}:generateContent`,
+      {
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: prompt }]
+          }
+        ],
+        generationConfig: { maxOutputTokens }
+      },
+      { timeoutMs: opts?.timeoutMs }
+    );
+    const text = extractTextFromGemini(data).trim();
+    const finish = getGeminiFinishInfo(data);
+    return { text, finishReason: finish.finishReason };
+  };
+
+  const first = await call(basePrompt, 2000);
+  const truncated =
+    (first.finishReason && first.finishReason.toLowerCase().includes('max')) || looksTruncated(first.text);
+  if (!truncated) {
+    return first.text;
+  }
+
+  const tail = first.text.slice(-900);
+  const continuationPrompt =
+    `Continue the summary without repeating any sentences.\n` +
+    `- Return ONLY the continuation text.\n` +
+    `- Ensure the final output ends with a complete sentence.\n\n` +
+    `PREVIOUS SUMMARY (do not repeat):\n${tail}\n\n` +
+    basePrompt;
+
+  const second = await call(continuationPrompt, 1200);
+  return `${first.text}\n\n${second.text}`.trim();
 }
 
 export async function runGemini(
