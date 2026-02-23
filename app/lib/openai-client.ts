@@ -1,33 +1,22 @@
 import { request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { URL } from 'node:url';
+import { getEnv, getEnvInt, getEnvNumber } from './env';
 
-const openaiApiKey = process.env.OPENAI_API_KEY;
+const openaiApiKey = getEnv('OPENAI_API_KEY');
 const openaiApiBase =
-  process.env.OPENAI_API_BASE?.trim() || 'https://api.openai.com/v1';
-const refinerModel = process.env.OPENAI_REFINER_MODEL || 'gpt-4.1-mini';
-const summaryModel = process.env.OPENAI_SUMMARY_MODEL || refinerModel;
-const deepResearchModel = process.env.OPENAI_DEEP_RESEARCH_MODEL || 'o3-deep-research';
-const deepResearchFallbackModel = (process.env.OPENAI_DEEP_RESEARCH_FALLBACK_MODEL || '').trim() || null;
-const maxToolCalls = process.env.OPENAI_MAX_TOOL_CALLS
-  ? Number(process.env.OPENAI_MAX_TOOL_CALLS)
-  : undefined;
-const requestTimeoutMs = process.env.OPENAI_REQUEST_TIMEOUT_MS
-  ? Number(process.env.OPENAI_REQUEST_TIMEOUT_MS)
-  : 10 * 60 * 1000;
-const headersTimeoutMs = process.env.OPENAI_HEADERS_TIMEOUT_MS
-  ? Number(process.env.OPENAI_HEADERS_TIMEOUT_MS)
-  : 10 * 60 * 1000;
-const bodyTimeoutMs = process.env.OPENAI_BODY_TIMEOUT_MS
-  ? Number(process.env.OPENAI_BODY_TIMEOUT_MS)
-  : 10 * 60 * 1000;
-const maxRetries = process.env.OPENAI_FETCH_RETRIES ? Number(process.env.OPENAI_FETCH_RETRIES) : 5;
-const retryBaseDelayMs = process.env.OPENAI_FETCH_RETRY_BASE_DELAY_MS
-  ? Number(process.env.OPENAI_FETCH_RETRY_BASE_DELAY_MS)
-  : 500;
-const deepResearchConcurrency = process.env.OPENAI_DEEP_RESEARCH_CONCURRENCY
-  ? Math.max(1, Math.trunc(Number(process.env.OPENAI_DEEP_RESEARCH_CONCURRENCY)))
-  : 1;
+  getEnv('OPENAI_API_BASE') || 'https://api.openai.com/v1';
+const refinerModel = getEnv('OPENAI_REFINER_MODEL') || 'gpt-4.1-mini';
+const summaryModel = getEnv('OPENAI_SUMMARY_MODEL') || refinerModel;
+const deepResearchModel = getEnv('OPENAI_DEEP_RESEARCH_MODEL') || 'o3-deep-research';
+const deepResearchFallbackModel = getEnv('OPENAI_DEEP_RESEARCH_FALLBACK_MODEL') || null;
+const maxToolCalls = getEnvNumber('OPENAI_MAX_TOOL_CALLS');
+const requestTimeoutMs = getEnvNumber('OPENAI_REQUEST_TIMEOUT_MS') ?? 10 * 60 * 1000;
+const headersTimeoutMs = getEnvNumber('OPENAI_HEADERS_TIMEOUT_MS') ?? 10 * 60 * 1000;
+const bodyTimeoutMs = getEnvNumber('OPENAI_BODY_TIMEOUT_MS') ?? 10 * 60 * 1000;
+const maxRetries = getEnvInt('OPENAI_FETCH_RETRIES') ?? 5;
+const retryBaseDelayMs = getEnvNumber('OPENAI_FETCH_RETRY_BASE_DELAY_MS') ?? 500;
+const deepResearchConcurrency = Math.max(1, getEnvInt('OPENAI_DEEP_RESEARCH_CONCURRENCY') ?? 1);
 
 export type RefinementResponse = {
   questions: string[];

@@ -2,9 +2,10 @@ import type { NextAuthOptions } from 'next-auth';
 import NextAuth from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
 import { query } from './db';
+import { getEnv } from './env';
 
-const googleClientId = process.env.GOOGLE_CLIENT_ID;
-const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+const googleClientId = getEnv('GOOGLE_CLIENT_ID');
+const googleClientSecret = getEnv('GOOGLE_CLIENT_SECRET');
 const hasGoogleProvider = Boolean(googleClientId && googleClientSecret);
 
 export const authOptions: NextAuthOptions = {

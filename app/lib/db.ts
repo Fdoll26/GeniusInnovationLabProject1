@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
+import { getEnv } from './env';
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = getEnv('DATABASE_URL');
 const globalForPool = globalThis as unknown as { pool?: Pool };
 
 export const pool: Pool | null =

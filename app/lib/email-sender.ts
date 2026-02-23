@@ -1,5 +1,7 @@
-const sendgridApiKey = process.env.SENDGRID_API_KEY;
-const emailFrom = process.env.EMAIL_FROM;
+import { getEnv } from './env';
+
+const sendgridApiKey = getEnv('SENDGRID_API_KEY');
+const emailFrom = getEnv('EMAIL_FROM');
 
 export async function sendReportEmail(params: {
   to: string;

@@ -1,8 +1,10 @@
-const geminiApiKey = process.env.GEMINI_API_KEY;
+import { getEnv } from './env';
+
+const geminiApiKey = getEnv('GEMINI_API_KEY');
 const geminiApiBase =
-  process.env.GEMINI_API_BASE?.trim() ||
+  getEnv('GEMINI_API_BASE') ||
   'https://generativelanguage.googleapis.com/v1beta';
-const geminiModel = process.env.GEMINI_MODEL || 'gemini-1.5-pro-002';
+const geminiModel = getEnv('GEMINI_MODEL') || 'gemini-1.5-pro-002';
 
 export type GeminiResponse = {
   outputText: string;

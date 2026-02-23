@@ -1,6 +1,8 @@
 # Multi-API Research – App Guide
 
-This document explains how the app works, how to run it, and why certain technical choices were made. It is based on the Speckit design docs in `specs/001-multi-api-research/` and the current implementation in `app/`.
+This document explains how the app works and how to run it. It is based on the Speckit design docs in `specs/001-multi-api-research/` and the current implementation in `app/`.
+
+For rationale/tradeoffs, see `docs/DESIGN_DECISIONS.md`.
 
 ## What The App Does
 
@@ -8,7 +10,7 @@ The app lets a signed-in user:
 
 1. Create a research session by submitting a topic/question.
 2. Answer refinement questions (if any) to improve the prompt.
-3. Approve the refined prompt.
+3. Approve the refined prompt (even if there were zero questions).
 4. Run research with two providers (OpenAI “Deep Research” and Google Gemini) using the same refined prompt.
 5. Store session history and provider outputs in PostgreSQL.
 6. Generate a PDF report and email it to the user on completion (including “partial” completion when one provider fails).
@@ -81,6 +83,7 @@ Orchestration: `app/lib/orchestration.ts`
   - OpenAI refiner (`app/lib/openai-client.ts`) or
   - Gemini refiner (`app/lib/gemini-client.ts`)
 - If questions are returned, they are stored in `refinement_questions` and the session moves to `state='refining'`.
+- If no questions are returned, the server still rewrites the prompt (best-effort) and sets `state='refining'` with `refined_prompt`.
 - The client submits answers one at a time:
   - `POST /api/research/sessions/:sessionId/refinement/answer` (`app/api/research/sessions/[sessionId]/refinement/answer/route.ts`)
 - When refinement is complete, the user approves the refined prompt:
@@ -90,8 +93,16 @@ Orchestration: `app/lib/orchestration.ts`
 Orchestration: `runProviders()` in `app/lib/orchestration.ts`
 
 - On approval, the session enters `state='running_research'`.
-- OpenAI and Gemini runs are launched (with provider-level status updates in `provider_results`).
+- OpenAI and Gemini runs are launched via a simple DB-backed queue:
+  - each provider gets a `provider_results` row in `status='queued'`
+  - provider queues are processed under a per-provider advisory lock (with an in-memory fallback)
 - Results are stored as `provider_results.output_text` (+ `sources_json` when available).
+
+OpenAI specifics:
+- Deep Research is treated as an async job (stores a response id and polls until terminal).
+
+Gemini specifics:
+- The research call is synchronous (a queued item usually becomes terminal in the same queue pass).
 
 ### 4) Aggregate + PDF + Email
 Orchestration: `finalizeReport()` in `app/lib/orchestration.ts`
@@ -103,6 +114,8 @@ Orchestration: `finalizeReport()` in `app/lib/orchestration.ts`
   - `completed` if both providers succeeded
   - `partial` if one failed/skipped
   - `failed` if both failed/skipped or a fatal aggregation/send error occurs
+- `finalizeReport()` uses an advisory lock when PostgreSQL is available to avoid duplicate sends.
+- If a report was already emailed, subsequent “finalize” attempts will not resend it.
 
 ## “Background Jobs” Without A Worker
 
@@ -151,6 +164,7 @@ Other notable endpoints:
 - Settings: `GET/POST /api/settings` (`app/api/settings/route.ts`)
 - Rate limit status: `GET /api/rate-limit` (`app/api/rate-limit/route.ts`)
 - Reports “recent”: `GET /api/reports/recent` (implemented via `app/api/reports/[action]/route.ts` with `action='recent'`)
+- Report resend: `POST /api/research/sessions/:sessionId/regenerate-report` (implemented via `app/api/research/sessions/[sessionId]/[action]/route.ts`)
 
 ## Running The App (Local)
 
@@ -163,20 +177,9 @@ Other notable endpoints:
 - SendGrid API key (or use debug stubs)
 
 ### 1) Configure Environment
-Copy `.env.example` → `.env.local` and set required variables:
-- `DATABASE_URL`
-- `NEXTAUTH_URL`, `NEXTAUTH_SECRET`
-- `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`
-- `OPENAI_API_KEY`
-- `GEMINI_API_KEY`
-- `SENDGRID_API_KEY`, `EMAIL_FROM`
+Copy `.env.example` → `.env.local` and set required variables.
 
-Optional / advanced:
-- `RATE_LIMIT_WINDOW_SECONDS`, `RATE_LIMIT_MAX_REQUESTS`
-- OpenAI tuning:
-  - `OPENAI_API_BASE`, `OPENAI_REFINER_MODEL`, `OPENAI_DEEP_RESEARCH_MODEL`, `OPENAI_MAX_TOOL_CALLS`
-- Gemini tuning:
-  - `GEMINI_API_BASE`, `GEMINI_MODEL`
+Setup guide: `docs/API_SETUP.md`.
 
 ### 2) Initialize DB Schema
 Run:

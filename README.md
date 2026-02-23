@@ -1,31 +1,43 @@
 # Multi-API Research
 
-A minimal Next.js app that runs deep research across OpenAI and Gemini, tracks
-session history, and emails a PDF report upon completion.
+Next.js app that orchestrates “deep research” across OpenAI + Gemini, stores session history in PostgreSQL, generates a PDF report, and emails it on completion.
 
-## Setup
+## Code Organization
 
-1. Copy `.env.example` to `.env.local` and fill in values.
-2. Initialize (or update) your PostgreSQL schema:
+- Frontend (React): `app/(research)/`
+- Backend (Next Route Handlers): `app/api/`
+- Server-side modules (DB, orchestration, providers, PDF/email): `app/lib/`
+- Database schema/migrations: `db/`
+- Tests (Vitest): `tests/`
+
+For a deeper technical walkthrough, see `docs/APP_GUIDE.md`.
+
+## Setup (Local)
+
+Prereqs: Node.js LTS, PostgreSQL.
+
+1. Install deps:
+   - `npm install`
+2. Configure env:
+   - Copy `.env.example` → `.env.local`
+   - Fill in required values (details in `docs/API_SETUP.md`)
+3. Initialize the database schema:
    - `psql "$DATABASE_URL" -f db/init.sql`
-3. (Optional) Load dummy seed data for local dev:
+4. Start dev server:
+   - `npm run dev`
+5. (Optional) Seed sample data:
    - `psql "$DATABASE_URL" -f db/seed/seed.sql`
-3. Install dependencies and start the dev server.
 
-## Flow
+## Running Checks
 
-- Sign in with Google on Home.
-- Submit a research topic to create a session.
-- Answer refinement questions, approve the refined prompt.
-- OpenAI and Gemini run in parallel; results are aggregated into a PDF.
-- Email is sent on terminal state (completed/partial/failed).
-- View session history in the History screen.
+- `npm test`
+- `npm run lint`
 
-## Debug Panel (dev only)
+## Debug Panel (Dev)
 
-- Visit `/?debug=1` to auto-enable bypass auth + stubbed externals.
-- Or toggle in the Debug Panel on Home.
-- Env overrides:
+- Visit `/?debug=1` to auto-enable auth bypass + stubbed externals.
+- Or toggle in the Debug Panel UI (requires `NEXT_PUBLIC_DEBUG_PANEL=1` or `true`).
+- Env overrides (string booleans):
   - `DEV_BYPASS_AUTH=true`
   - `DEV_STUB_EXTERNALS=true`
   - `DEV_STUB_REFINER=true`
@@ -36,12 +48,11 @@ session history, and emails a PDF report upon completion.
   - `DEV_SKIP_OPENAI=true`
   - `DEV_SKIP_GEMINI=true`
 
-## Access Control & Rate Limits
+## Rate Limits
 
-- `RATE_LIMIT_WINDOW_SECONDS` and `RATE_LIMIT_MAX_REQUESTS` apply to session creation,
-  prompt approval, and retries.
+`RATE_LIMIT_WINDOW_SECONDS` and `RATE_LIMIT_MAX_REQUESTS` apply to session creation, prompt approval, and retries.
 
 ## OpenAI Deep Research Notes
 
 - Deep research calls require at least one tool (e.g., `web_search_preview`).
-- Clarification + prompt rewrite are handled via a refiner model before the deep research call.
+- Clarification + prompt rewrite run before deep research via the configured refiner model.

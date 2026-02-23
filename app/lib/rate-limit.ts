@@ -1,11 +1,8 @@
 import { query } from './db';
+import { getEnvNumber } from './env';
 
-const windowSeconds = process.env.RATE_LIMIT_WINDOW_SECONDS
-  ? Number(process.env.RATE_LIMIT_WINDOW_SECONDS)
-  : 60;
-const maxRequests = process.env.RATE_LIMIT_MAX_REQUESTS
-  ? Number(process.env.RATE_LIMIT_MAX_REQUESTS)
-  : 10;
+const windowSeconds = getEnvNumber('RATE_LIMIT_WINDOW_SECONDS') ?? 60;
+const maxRequests = getEnvNumber('RATE_LIMIT_MAX_REQUESTS') ?? 10;
 
 export async function checkRateLimit(params: {
   userId: string;

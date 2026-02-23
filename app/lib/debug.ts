@@ -1,4 +1,5 @@
 import { cookies } from 'next/headers';
+import { getEnvBool } from './env';
 
 export type DebugFlags = {
   bypassAuth: boolean;
@@ -13,15 +14,15 @@ export type DebugFlags = {
 };
 
 export async function getDebugFlags(): Promise<DebugFlags> {
-  const envBypass = process.env.DEV_BYPASS_AUTH === 'true';
-  const envStub = process.env.DEV_STUB_EXTERNALS === 'true';
-  const envStubRefiner = process.env.DEV_STUB_REFINER === 'true';
-  const envStubOpenAI = process.env.DEV_STUB_OPENAI === 'true';
-  const envStubGemini = process.env.DEV_STUB_GEMINI === 'true';
-  const envStubEmail = process.env.DEV_STUB_EMAIL === 'true';
-  const envStubPdf = process.env.DEV_STUB_PDF === 'true';
-  const envSkipOpenAI = process.env.DEV_SKIP_OPENAI === 'true';
-  const envSkipGemini = process.env.DEV_SKIP_GEMINI === 'true';
+  const envBypass = getEnvBool('DEV_BYPASS_AUTH') ?? false;
+  const envStub = getEnvBool('DEV_STUB_EXTERNALS') ?? false;
+  const envStubRefiner = getEnvBool('DEV_STUB_REFINER') ?? false;
+  const envStubOpenAI = getEnvBool('DEV_STUB_OPENAI') ?? false;
+  const envStubGemini = getEnvBool('DEV_STUB_GEMINI') ?? false;
+  const envStubEmail = getEnvBool('DEV_STUB_EMAIL') ?? false;
+  const envStubPdf = getEnvBool('DEV_STUB_PDF') ?? false;
+  const envSkipOpenAI = getEnvBool('DEV_SKIP_OPENAI') ?? false;
+  const envSkipGemini = getEnvBool('DEV_SKIP_GEMINI') ?? false;
 
   let cookieBypass = false;
   let cookieStub = false;
