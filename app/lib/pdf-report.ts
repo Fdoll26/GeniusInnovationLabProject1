@@ -7,6 +7,10 @@ export type ReportInput = {
   summaryMode?: 'one' | 'two';
   openaiSummary?: string | null;
   geminiSummary?: string | null;
+  openaiStartedAt?: string | null;
+  openaiCompletedAt?: string | null;
+  geminiStartedAt?: string | null;
+  geminiCompletedAt?: string | null;
   references?: {
     openai: Array<{ n: number; title?: string; url: string; accessedAt?: string }>;
     gemini: Array<{ n: number; title?: string; url: string; accessedAt?: string }>;
@@ -32,6 +36,24 @@ function sanitizePdfText(value: string) {
     .normalize('NFKD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^\x09\x0A\x0D\x20-\x7E]/g, '?');
+}
+
+function tryParseDateMs(value: string | null | undefined): number | null {
+  if (!value) {
+    return null;
+  }
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? ms : null;
+}
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+  return `${minutes}m ${seconds}s`;
 }
 
 function toSentenceBullets(text: string, maxBullets: number) {
@@ -281,6 +303,20 @@ export async function buildPdfReport(
     y -= 6;
   };
 
+  const writeTiming = (startedAt: string | null | undefined, completedAt: string | null | undefined) => {
+    const startedMs = tryParseDateMs(startedAt ?? null);
+    const completedMs = tryParseDateMs(completedAt ?? null);
+
+    writeLine(`Started: ${startedMs ? new Date(startedMs).toLocaleString() : 'N/A'}`, { size: 10, color: muted });
+    writeLine(`Finished: ${completedMs ? new Date(completedMs).toLocaleString() : 'N/A'}`, { size: 10, color: muted });
+    if (startedMs != null && completedMs != null && completedMs >= startedMs) {
+      writeLine(`Duration: ${formatDuration(completedMs - startedMs)}`, { size: 10, color: muted });
+    } else {
+      writeLine('Duration: N/A', { size: 10, color: muted });
+    }
+    y -= 4;
+  };
+
   const openaiFallbackBullets = toSentenceBullets(input.openaiText ?? '', 2);
   const geminiFallbackBullets = toSentenceBullets(input.geminiText ?? '', 2);
   const openaiSummary =
@@ -314,10 +350,12 @@ export async function buildPdfReport(
   writeSectionHeading('Full Results', brand);
 
   writeLine('OpenAI deep research', { bold: true, size: 12, color: openaiAccent });
+  writeTiming(input.openaiStartedAt, input.openaiCompletedAt);
   writeParagraph(input.openaiText ?? 'No result', { size: bodyFontSize });
   y -= 8;
 
   writeLine('Gemini research', { bold: true, size: 12, color: geminiAccent });
+  writeTiming(input.geminiStartedAt, input.geminiCompletedAt);
   writeParagraph(input.geminiText ?? 'No result', { size: bodyFontSize });
 
   if (input.references?.openai?.length || input.references?.gemini?.length) {

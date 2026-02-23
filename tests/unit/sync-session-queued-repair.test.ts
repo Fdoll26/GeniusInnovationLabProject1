@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 const listProviderResults = vi.fn();
 const upsertProviderResult = vi.fn(async () => undefined);
+const getRunningProviderResult = vi.fn(async () => null);
+const getNextQueuedProviderResult = vi.fn(async () => null);
 
 vi.mock('../../app/lib/session-repo', () => ({
   getSessionById: vi.fn(async () => ({
@@ -33,7 +35,9 @@ vi.mock('../../app/lib/user-settings-repo', () => ({
 
 vi.mock('../../app/lib/provider-repo', () => ({
   listProviderResults: (...args: any[]) => listProviderResults(...args),
-  upsertProviderResult: (...args: any[]) => upsertProviderResult(...args)
+  upsertProviderResult: (...args: any[]) => upsertProviderResult(...args),
+  getRunningProviderResult: (...args: any[]) => getRunningProviderResult(...args),
+  getNextQueuedProviderResult: (...args: any[]) => getNextQueuedProviderResult(...args)
 }));
 
 vi.mock('../../app/lib/openai-client', () => ({

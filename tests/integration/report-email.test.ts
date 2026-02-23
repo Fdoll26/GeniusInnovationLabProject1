@@ -12,8 +12,8 @@ vi.mock('../../app/lib/session-repo', () => ({
 }));
 vi.mock('../../app/lib/provider-repo', () => ({
   listProviderResults: vi.fn(async () => [
-    { provider: 'openai', status: 'completed', output_text: 'A' },
-    { provider: 'gemini', status: 'completed', output_text: 'B' }
+    { provider: 'openai', status: 'completed', output_text: 'A', started_at: '2026-02-23T00:00:00.000Z', completed_at: '2026-02-23T00:01:05.000Z' },
+    { provider: 'gemini', status: 'completed', output_text: 'B', started_at: '2026-02-23T00:00:10.000Z', completed_at: '2026-02-23T00:02:10.000Z' }
   ])
 }));
 vi.mock('../../app/lib/pdf-report', () => ({
@@ -57,6 +57,15 @@ import { finalizeReport } from '../../app/lib/orchestration';
 describe('finalizeReport', () => {
   it('creates and emails report', async () => {
     await finalizeReport('s1', false, false, { stub: true });
-    expect(true).toBe(true);
+    const { buildPdfReport } = await import('../../app/lib/pdf-report');
+    expect(buildPdfReport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        openaiStartedAt: '2026-02-23T00:00:00.000Z',
+        openaiCompletedAt: '2026-02-23T00:01:05.000Z',
+        geminiStartedAt: '2026-02-23T00:00:10.000Z',
+        geminiCompletedAt: '2026-02-23T00:02:10.000Z'
+      }),
+      expect.anything()
+    );
   });
 });

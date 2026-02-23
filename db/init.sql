@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS provider_results (
   status text NOT NULL,
   output_text text,
   sources_json jsonb,
+  queued_at timestamptz,
   started_at timestamptz,
   completed_at timestamptz,
   error_code text,
@@ -111,7 +112,8 @@ CREATE TABLE IF NOT EXISTS user_settings (
 ALTER TABLE provider_results
   ADD COLUMN IF NOT EXISTS external_id text,
   ADD COLUMN IF NOT EXISTS external_status text,
-  ADD COLUMN IF NOT EXISTS last_polled_at timestamptz;
+  ADD COLUMN IF NOT EXISTS last_polled_at timestamptz,
+  ADD COLUMN IF NOT EXISTS queued_at timestamptz;
 
 ALTER TABLE user_settings
   ADD COLUMN IF NOT EXISTS theme text NOT NULL DEFAULT 'light';
@@ -123,4 +125,3 @@ ALTER TABLE user_settings
   ADD CONSTRAINT user_settings_theme_check CHECK (theme IN ('light', 'dark'));
 
 COMMIT;
-

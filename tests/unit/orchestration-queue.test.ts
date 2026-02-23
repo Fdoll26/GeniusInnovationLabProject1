@@ -3,6 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 const listProviderResults = vi.fn();
 const upsertProviderResult = vi.fn(async () => undefined);
+const getRunningProviderResult = vi.fn(async () => null);
+const getNextQueuedProviderResult = vi.fn();
 
 vi.mock('../../app/lib/session-repo', () => ({
   getSessionById: vi.fn(async () => ({ id: 's1', user_id: 'u1', refined_prompt: 'Prompt', state: 'running_research' })),
@@ -24,14 +26,15 @@ vi.mock('../../app/lib/user-settings-repo', () => ({
 }));
 vi.mock('../../app/lib/provider-repo', () => ({
   listProviderResults: (...args: any[]) => listProviderResults(...args),
-  upsertProviderResult: (...args: any[]) => upsertProviderResult(...args)
+  upsertProviderResult: (...args: any[]) => upsertProviderResult(...args),
+  getRunningProviderResult: (...args: any[]) => getRunningProviderResult(...args),
+  getNextQueuedProviderResult: (...args: any[]) => getNextQueuedProviderResult(...args)
 }));
 vi.mock('../../app/lib/openai-client', () => ({
   getResponseOutputText: vi.fn(() => ''),
   getResponseSources: vi.fn(() => null),
   pollDeepResearch: vi.fn(async () => ({ status: 'completed', data: {} })),
-  resumeDeepResearch: vi.fn(async () => ({ outputText: 'resumed', sources: null, responseId: 'r1' })),
-  runResearch: vi.fn(async () => ({ outputText: 'openai', sources: null, responseId: 'r1' })),
+  startResearchJob: vi.fn(async () => ({ responseId: 'r1', status: 'in_progress', data: {} })),
   startRefinement: vi.fn(async () => ({ questions: [] })),
   rewritePrompt: vi.fn(async () => 'rewritten'),
   summarizeForReport: vi.fn(async () => 'summary')
@@ -44,20 +47,29 @@ vi.mock('../../app/lib/gemini-client', () => ({
 }));
 
 import { runProviders } from '../../app/lib/orchestration';
-import { runResearch } from '../../app/lib/openai-client';
+import { startResearchJob } from '../../app/lib/openai-client';
 import { runGemini } from '../../app/lib/gemini-client';
 
 describe('runProviders', () => {
   it('does not treat queued provider results as a hard stop', async () => {
-    listProviderResults.mockImplementation(async () => [
-      { provider: 'openai', status: 'queued', external_id: null },
-      { provider: 'gemini', status: 'queued' }
-    ]);
+    listProviderResults.mockResolvedValue([]);
+    let returnedOpenAi = false;
+    let returnedGemini = false;
+    getNextQueuedProviderResult.mockImplementation(async (provider: 'openai' | 'gemini') => {
+      if (provider === 'openai' && !returnedOpenAi) {
+        returnedOpenAi = true;
+        return { session_id: 's1', provider: 'openai', status: 'queued' };
+      }
+      if (provider === 'gemini' && !returnedGemini) {
+        returnedGemini = true;
+        return { session_id: 's1', provider: 'gemini', status: 'queued' };
+      }
+      return null;
+    });
 
     await runProviders('s1');
 
-    expect(runResearch).toHaveBeenCalled();
+    expect(startResearchJob).toHaveBeenCalled();
     expect(runGemini).toHaveBeenCalled();
   });
 });
-

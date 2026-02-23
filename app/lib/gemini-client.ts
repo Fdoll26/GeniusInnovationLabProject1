@@ -276,8 +276,9 @@ export async function summarizeForReportGemini(
           parts: [
             {
               text:
-                `Write exactly ONE paragraph summarizing the following ${input.provider} research output.\n` +
+                `Write a thorough summary of the following ${input.provider} research output.\n` +
                 `- Use neutral, factual language.\n` +
+                `- Aim for 2–4 paragraphs and complete sentences (do not cut off mid-sentence).\n` +
                 (includeRefs
                   ? `- If you make a factual claim that is supported by a reference, add a citation like [3].\n` +
                     `- Use ONLY the reference numbers provided below.\n` +
@@ -290,7 +291,7 @@ export async function summarizeForReportGemini(
           ]
         }
       ],
-      generationConfig: { maxOutputTokens: 450 }
+      generationConfig: { maxOutputTokens: 1200 }
     },
     { timeoutMs: opts?.timeoutMs }
   );

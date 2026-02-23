@@ -772,6 +772,104 @@ export async function runResearch(
   }
 }
 
+export async function startResearchJob(
+  refinedPrompt: string,
+  opts?: {
+    stub?: boolean;
+    timeoutMs?: number;
+    maxSources?: number;
+    reasoningLevel?: ReasoningLevel;
+  }
+): Promise<{ responseId: string | null; status: string | null; data: unknown }> {
+  if (opts?.stub) {
+    return { responseId: null, status: 'completed', data: { output_text: `Stubbed OpenAI result for: ${refinedPrompt}` } };
+  }
+
+  const maxSources =
+    typeof opts?.maxSources === 'number'
+      ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources)))
+      : null;
+  const sourceBudgetText =
+    maxSources != null
+      ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
+      : null;
+  const messageInput = [
+    ...(sourceBudgetText
+      ? ([
+          {
+            role: 'system',
+            content: [{ type: 'input_text', text: sourceBudgetText }]
+          }
+        ] as const)
+      : []),
+    {
+      role: 'user',
+      content: [{ type: 'input_text', text: refinedPrompt }]
+    }
+  ] as const;
+  const legacyInput = sourceBudgetText ? `${sourceBudgetText}\n\n${refinedPrompt}` : refinedPrompt;
+
+  const mappedEffort = (() => {
+    if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
+      return null;
+    }
+    if (deepResearchModel.includes('o4-mini-deep-research')) {
+      return 'medium' as const;
+    }
+    return opts.reasoningLevel as ReasoningEffort;
+  })();
+  const reasoning = mappedEffort ? { effort: mappedEffort } : undefined;
+
+  const body = buildDeepResearchBody(legacyInput, reasoning);
+  try {
+    const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
+    let started: { responseId: string | null; status: string | null; data: unknown };
+    const startWithInputFallback = async (override?: { effort: ReasoningEffort }) => {
+      try {
+        return await startDeepResearch(messageInput, {
+          timeoutMs: timeoutBudgetMs,
+          reasoning: override
+        });
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (!isUnsupportedMessageInputError(msg)) {
+          throw error;
+        }
+        return await startDeepResearch(legacyInput, {
+          timeoutMs: timeoutBudgetMs,
+          reasoning: override
+        });
+      }
+    };
+    try {
+      started = await startWithInputFallback(reasoning);
+    } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      if (!isUnsupportedReasoningEffortError(msg)) {
+        throw error;
+      }
+      try {
+        started = await startWithInputFallback({ effort: 'medium' });
+      } catch {
+        started = await startWithInputFallback(undefined);
+      }
+    }
+    return started;
+  } catch (error) {
+    if (!deepResearchFallbackModel) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    const jsonStart = message.indexOf('{');
+    const errorText = jsonStart >= 0 ? message.slice(jsonStart) : message;
+    if (!isDeepResearchAccessError(errorText)) {
+      throw error;
+    }
+    const data = await request('/responses', withModel(body, deepResearchFallbackModel));
+    return { responseId: null, status: 'completed', data };
+  }
+}
+
 function buildDeepResearchBody(input: unknown, reasoning?: { effort: ReasoningEffort }) {
   return {
     model: deepResearchModel,

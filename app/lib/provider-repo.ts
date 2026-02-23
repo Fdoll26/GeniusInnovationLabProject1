@@ -7,6 +7,7 @@ export type ProviderResultRecord = {
   status: string;
   output_text: string | null;
   sources_json: unknown | null;
+  queued_at?: string | null;
   started_at: string | null;
   completed_at: string | null;
   error_code: string | null;
@@ -24,6 +25,7 @@ export async function upsertProviderResult(params: {
   sources?: unknown | null;
   errorCode?: string | null;
   errorMessage?: string | null;
+  queuedAt?: string | null;
   startedAt?: string | null;
   completedAt?: string | null;
   externalId?: string | null;
@@ -33,8 +35,8 @@ export async function upsertProviderResult(params: {
   try {
     await query(
       `INSERT INTO provider_results
-       (session_id, provider, status, output_text, sources_json, error_code, error_message, started_at, completed_at, external_id, external_status, last_polled_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+       (session_id, provider, status, output_text, sources_json, error_code, error_message, queued_at, started_at, completed_at, external_id, external_status, last_polled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (session_id, provider)
        DO UPDATE SET
          status = EXCLUDED.status,
@@ -42,6 +44,7 @@ export async function upsertProviderResult(params: {
          sources_json = COALESCE(EXCLUDED.sources_json, provider_results.sources_json),
          error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
          error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
+         queued_at = COALESCE(EXCLUDED.queued_at, provider_results.queued_at),
          started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
          completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at),
          external_id = COALESCE(EXCLUDED.external_id, provider_results.external_id),
@@ -55,6 +58,7 @@ export async function upsertProviderResult(params: {
         params.sources ?? null,
         params.errorCode ?? null,
         params.errorMessage ?? null,
+        params.queuedAt ?? null,
         params.startedAt ?? null,
         params.completedAt ?? null,
         params.externalId ?? null,
@@ -68,8 +72,8 @@ export async function upsertProviderResult(params: {
     if (lower.includes('external_id') && lower.includes('does not exist')) {
       await query(
         `INSERT INTO provider_results
-         (session_id, provider, status, output_text, sources_json, error_code, error_message, started_at, completed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         (session_id, provider, status, output_text, sources_json, error_code, error_message, queued_at, started_at, completed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (session_id, provider)
          DO UPDATE SET
            status = EXCLUDED.status,
@@ -77,6 +81,7 @@ export async function upsertProviderResult(params: {
            sources_json = COALESCE(EXCLUDED.sources_json, provider_results.sources_json),
            error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
            error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
+           queued_at = COALESCE(EXCLUDED.queued_at, provider_results.queued_at),
            started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
            completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at)`,
         [
@@ -87,6 +92,7 @@ export async function upsertProviderResult(params: {
           params.sources ?? null,
           params.errorCode ?? null,
           params.errorMessage ?? null,
+          params.queuedAt ?? null,
           params.startedAt ?? null,
           params.completedAt ?? null
         ]
@@ -102,4 +108,30 @@ export async function listProviderResults(sessionId: string): Promise<ProviderRe
     'SELECT * FROM provider_results WHERE session_id = $1 ORDER BY provider',
     [sessionId]
   );
+}
+
+export async function getRunningProviderResult(provider: 'openai' | 'gemini'): Promise<ProviderResultRecord | null> {
+  const rows = await query<ProviderResultRecord>(
+    `SELECT *
+     FROM provider_results
+     WHERE provider = $1
+       AND status = 'running'
+     ORDER BY started_at ASC NULLS LAST, id ASC
+     LIMIT 1`,
+    [provider]
+  );
+  return rows[0] ?? null;
+}
+
+export async function getNextQueuedProviderResult(provider: 'openai' | 'gemini'): Promise<ProviderResultRecord | null> {
+  const rows = await query<ProviderResultRecord>(
+    `SELECT *
+     FROM provider_results
+     WHERE provider = $1
+       AND status = 'queued'
+     ORDER BY queued_at ASC NULLS FIRST, id ASC
+     LIMIT 1`,
+    [provider]
+  );
+  return rows[0] ?? null;
 }
