@@ -330,14 +330,15 @@ export async function summarizeForReportGemini(
 
 export async function runGemini(
   refinedPrompt: string,
-  opts?: { stub?: boolean; timeoutMs?: number; maxSources?: number }
+  opts?: { stub?: boolean; timeoutMs?: number; maxSources?: number; model?: string }
 ): Promise<GeminiResponse> {
   if (opts?.stub) {
     return { outputText: `Stubbed Gemini result for: ${refinedPrompt}` };
   }
+  const selectedModel = opts?.model || geminiModel;
   const timeBudgetMinutes = 10;
-  const maxSearchQueries = 30;
-  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources))) : 15;
+  const maxSearchQueries = 80;
+  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources))) : 15;
   const freshnessWindow = 'the last 12 months';
   const contextConstraints = 'None';
 
@@ -377,7 +378,7 @@ export async function runGemini(
     const tools = params.useTools ? ([{ google_search: {} }] as const) : undefined;
     if (params.legacy) {
       return await request(
-        `/models/${geminiModel}:generateContent`,
+        `/models/${selectedModel}:generateContent`,
         {
           ...(tools ? { tools } : {}),
           contents: [{ role: 'user', parts: [{ text: params.systemKey ? `${safeSystemText}\n\nRESEARCH QUESTION (refined):\n${refinedPrompt}` : legacyPrompt }] }],
@@ -388,7 +389,7 @@ export async function runGemini(
     }
     if (params.systemKey === 'system_instruction') {
       return await request(
-        `/models/${geminiModel}:generateContent`,
+        `/models/${selectedModel}:generateContent`,
         {
           ...(tools ? { tools } : {}),
           system_instruction: { parts: [{ text: systemText }] },
@@ -400,7 +401,7 @@ export async function runGemini(
     }
     if (params.systemKey === 'systemInstruction') {
       return await request(
-        `/models/${geminiModel}:generateContent`,
+        `/models/${selectedModel}:generateContent`,
         {
           ...(tools ? { tools } : {}),
           systemInstruction: { parts: [{ text: systemText }] },
@@ -411,7 +412,7 @@ export async function runGemini(
       );
     }
     return await request(
-      `/models/${geminiModel}:generateContent`,
+      `/models/${selectedModel}:generateContent`,
       {
         ...(tools ? { tools } : {}),
         contents: [{ role: 'user', parts: [{ text: legacyPrompt }] }],
@@ -453,7 +454,7 @@ export async function runGemini(
     // Retry once with explicit instructions to avoid tool/function calling; otherwise Gemini may output a tool call
     // that this app can't execute/ground, resulting in an empty response.
     try {
-      data = await request(`/models/${geminiModel}:generateContent`, {
+      data = await request(`/models/${selectedModel}:generateContent`, {
         tools: [{ google_search: {} }],
         system_instruction: { parts: [{ text: safeSystemText }] },
         contents: [{ role: 'user', parts: [{ text: refinedPrompt }] }],
@@ -461,7 +462,7 @@ export async function runGemini(
       }, { timeoutMs: opts?.timeoutMs });
     } catch {
       data = await request(
-        `/models/${geminiModel}:generateContent`,
+        `/models/${selectedModel}:generateContent`,
         {
           contents: [{ role: 'user', parts: [{ text: `${safeSystemText}\n\nRESEARCH QUESTION (refined):\n${refinedPrompt}` }] }],
           generationConfig: { maxOutputTokens: 2500 }
@@ -478,5 +479,32 @@ export async function runGemini(
   return {
     outputText,
     sources: grounding ?? data?.candidates?.[0]?.citationMetadata
+  };
+}
+
+export async function runGeminiReasoningStep(params: {
+  prompt: string;
+  maxOutputTokens: number;
+  model?: string;
+  timeoutMs?: number;
+  useSearch?: boolean;
+}): Promise<{ text: string; sources?: unknown; usage?: unknown }> {
+  const model = params.model || geminiModel;
+  const useSearch = params.useSearch ?? true;
+  const data = await request(
+    `/models/${model}:generateContent`,
+    {
+      ...(useSearch ? { tools: [{ google_search: {} }] } : {}),
+      contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
+      generationConfig: { maxOutputTokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))) }
+    },
+    { timeoutMs: params.timeoutMs }
+  );
+  const text = extractTextFromGemini(data).trim();
+  const grounding = getGeminiGroundingMetadata(data);
+  return {
+    text: grounding ? addInlineUrlCitationsFromGrounding(text, grounding) : text,
+    sources: grounding ?? data,
+    usage: (data as { usageMetadata?: unknown }).usageMetadata
   };
 }

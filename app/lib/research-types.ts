@@ -1,0 +1,115 @@
+export type ResearchWorkflowState =
+  | 'NEW'
+  | 'NEEDS_CLARIFICATION'
+  | 'PLANNED'
+  | 'IN_PROGRESS'
+  | 'SYNTHESIS'
+  | 'DONE'
+  | 'FAILED';
+
+export type ResearchProviderName = 'openai' | 'gemini';
+export type ResearchMode = 'native' | 'custom';
+export type ResearchDepth = 'light' | 'standard' | 'deep';
+
+export const STEP_SEQUENCE = [
+  'DEVELOP_RESEARCH_PLAN',
+  'DISCOVER_SOURCES_WITH_PLAN',
+  'SHORTLIST_RESULTS',
+  'DEEP_READ',
+  'EXTRACT_EVIDENCE',
+  'COUNTERPOINTS',
+  'GAP_CHECK',
+  'SECTION_SYNTHESIS'
+] as const;
+
+export type StepType = (typeof STEP_SEQUENCE)[number] | 'NATIVE_SECTION';
+
+export const STEP_LABELS: Record<(typeof STEP_SEQUENCE)[number], string> = {
+  DEVELOP_RESEARCH_PLAN: 'Develop Research Plan',
+  DISCOVER_SOURCES_WITH_PLAN: 'Discover Sources',
+  SHORTLIST_RESULTS: 'Shortlist Results',
+  DEEP_READ: 'Deep Read',
+  EXTRACT_EVIDENCE: 'Extract Evidence',
+  COUNTERPOINTS: 'Counterpoints',
+  GAP_CHECK: 'Gap Check',
+  SECTION_SYNTHESIS: 'Section Synthesis'
+};
+
+export type StepStatus = 'queued' | 'running' | 'done' | 'failed';
+
+export type TokenUsage = {
+  prompt?: number | null;
+  output?: number | null;
+  reasoning?: number | null;
+  total?: number | null;
+};
+
+export type ReliabilityTag =
+  | 'primary'
+  | 'peer_reviewed'
+  | 'gov'
+  | 'press'
+  | 'blog'
+  | 'unknown';
+
+export type ResearchCitation = {
+  citation_id: string;
+  url: string;
+  title?: string | null;
+  publisher?: string | null;
+  accessed_at: string;
+  provider_metadata?: Record<string, unknown> | null;
+  reliability_tags?: ReliabilityTag[];
+};
+
+export type EvidenceConfidence = 'low' | 'med' | 'high';
+
+export type ResearchEvidence = {
+  evidence_id: string;
+  claim: string;
+  supporting_snippet: string;
+  source_citation_ids: string[];
+  confidence: EvidenceConfidence;
+  notes?: string | null;
+};
+
+export type ResearchStepArtifact = {
+  step_goal: string;
+  inputs_summary: string;
+  raw_output_text: string;
+  citations: ResearchCitation[];
+  evidence: ResearchEvidence[];
+  tools_used?: string[];
+  token_usage?: TokenUsage | null;
+  model_used?: string | null;
+  next_step_hint?: string | null;
+  structured_output?: Record<string, unknown> | null;
+};
+
+export type ResearchPlanSection = {
+  section: string;
+  objectives: string[];
+  query_pack: string[];
+  acceptance_criteria: string[];
+};
+
+export type ResearchPlan = {
+  objectives: string[];
+  outline: string[];
+  sections: ResearchPlanSection[];
+  source_quality_requirements: {
+    primary_sources_required: boolean;
+    recency: string;
+    geography: string;
+    secondary_sources_allowed: boolean;
+  };
+  token_budgets: Partial<Record<(typeof STEP_SEQUENCE)[number], number>>;
+  output_budgets: Partial<Record<(typeof STEP_SEQUENCE)[number], number>>;
+};
+
+export type PipelineProgress = {
+  step_id: (typeof STEP_SEQUENCE)[number] | null;
+  step_index: number;
+  total_steps: number;
+  step_label: string | null;
+};

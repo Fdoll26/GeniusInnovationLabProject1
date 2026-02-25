@@ -44,6 +44,23 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
     return `${provider}: ${clean}`;
   };
 
+  const researchProviders = status.research?.providers ?? [];
+  const providerProgressByName = new Map(researchProviders.map((p) => [p.provider, p]));
+  const activeResearchProvider =
+    researchProviders.find((p) => p.state === 'IN_PROGRESS') ??
+    researchProviders.find((p) => p.state === 'PLANNED') ??
+    researchProviders[0] ??
+    null;
+  const activeStepLabel =
+    activeResearchProvider?.progress?.stepLabel ??
+    activeResearchProvider?.progress?.stepId?.replace(/_/g, ' ') ??
+    null;
+  const activeStepIndex = activeResearchProvider?.progress?.stepNumber ?? activeResearchProvider?.stepIndex ?? 0;
+  const activeStepTotal = activeResearchProvider?.progress?.totalSteps ?? activeResearchProvider?.maxSteps ?? 8;
+  const globalDeepResearchLabel = activeResearchProvider
+    ? `${activeResearchProvider.provider === 'openai' ? 'OpenAI' : 'Gemini'}: ${activeStepLabel ?? 'Running'} (${Math.min(activeStepIndex, activeStepTotal)}/${activeStepTotal})`
+    : null;
+
   return (
     <div className="card stack">
       <div className="status-row">
@@ -103,6 +120,14 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
               {openai?.completedAt ? (
                 <small className="muted">Completed: {new Date(openai.completedAt).toLocaleString()}</small>
               ) : null}
+              {providerProgressByName.get('openai')?.progress?.stepLabel ? (
+                <small className="muted">
+                  {`OpenAI: ${providerProgressByName.get('openai')?.progress?.stepLabel} (${Math.min(
+                    providerProgressByName.get('openai')?.progress?.stepNumber ?? 0,
+                    providerProgressByName.get('openai')?.progress?.totalSteps ?? 8
+                  )}/${providerProgressByName.get('openai')?.progress?.totalSteps ?? 8})`}
+                </small>
+              ) : null}
             </div>
 
             <div className="stack">
@@ -117,8 +142,41 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
               {gemini?.completedAt ? (
                 <small className="muted">Completed: {new Date(gemini.completedAt).toLocaleString()}</small>
               ) : null}
+              {providerProgressByName.get('gemini')?.progress?.stepLabel ? (
+                <small className="muted">
+                  {`Gemini: ${providerProgressByName.get('gemini')?.progress?.stepLabel} (${Math.min(
+                    providerProgressByName.get('gemini')?.progress?.stepNumber ?? 0,
+                    providerProgressByName.get('gemini')?.progress?.totalSteps ?? 8
+                  )}/${providerProgressByName.get('gemini')?.progress?.totalSteps ?? 8})`}
+                </small>
+              ) : null}
             </div>
           </div>
+
+          {researchProviders.length > 0 ? (
+            <div className="stack">
+              <strong>Research Progress</strong>
+              {globalDeepResearchLabel ? <small className="muted">{globalDeepResearchLabel}</small> : null}
+              {researchProviders.map((providerRun) => (
+                <div key={providerRun.runId} className="stack">
+                  <small className="muted">
+                    {providerRun.provider === 'openai' ? 'OpenAI' : 'Gemini'} | State: {providerRun.state} | Steps:{' '}
+                    {Math.min(providerRun.stepIndex, providerRun.maxSteps)}/{providerRun.maxSteps} | Sources: {providerRun.sourceCount}
+                  </small>
+                  <div className="step-list">
+                    {providerRun.steps.map((step) => (
+                      <div key={step.id} className={`step ${step.status === 'running' ? 'is-active' : ''}`}>
+                        <span className="step__dot" aria-hidden />
+                        <span>
+                          #{step.stepIndex + 1} {step.stepType.replace(/_/g, ' ')} - {step.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
 
           {status.refinedAt ? (
             <small className="muted">Refined: {new Date(status.refinedAt).toLocaleString()}</small>

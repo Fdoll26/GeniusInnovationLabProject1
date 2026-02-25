@@ -654,13 +654,19 @@ export async function runResearch(
   }
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources)))
+      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
       ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
       : null;
+  const depthText =
+    'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
   const messageInput = [
+    {
+      role: 'system',
+      content: [{ type: 'input_text', text: depthText }]
+    },
     ...(sourceBudgetText
       ? ([
           {
@@ -674,7 +680,9 @@ export async function runResearch(
       content: [{ type: 'input_text', text: refinedPrompt }]
     }
   ] as const;
-  const legacyInput = sourceBudgetText ? `${sourceBudgetText}\n\n${refinedPrompt}` : refinedPrompt;
+  const legacyInput = sourceBudgetText
+    ? `${depthText}\n${sourceBudgetText}\n\n${refinedPrompt}`
+    : `${depthText}\n\n${refinedPrompt}`;
 
   const mappedEffort = (() => {
     if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
@@ -768,6 +776,7 @@ export async function startResearchJob(
     timeoutMs?: number;
     maxSources?: number;
     reasoningLevel?: ReasoningLevel;
+    model?: string;
   }
 ): Promise<{ responseId: string | null; status: string | null; data: unknown }> {
   if (opts?.stub) {
@@ -776,7 +785,7 @@ export async function startResearchJob(
 
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources)))
+      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
@@ -809,7 +818,7 @@ export async function startResearchJob(
   })();
   const reasoning = mappedEffort ? { effort: mappedEffort } : undefined;
 
-  const body = buildDeepResearchBody(legacyInput, reasoning);
+  const body = buildDeepResearchBody(legacyInput, reasoning, opts?.model);
   try {
     const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
     let started: { responseId: string | null; status: string | null; data: unknown };
@@ -817,7 +826,8 @@ export async function startResearchJob(
       try {
         return await startDeepResearch(messageInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -826,7 +836,8 @@ export async function startResearchJob(
         }
         return await startDeepResearch(legacyInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       }
     };
@@ -859,9 +870,13 @@ export async function startResearchJob(
   }
 }
 
-function buildDeepResearchBody(input: unknown, reasoning?: { effort: ReasoningEffort }) {
+function buildDeepResearchBody(
+  input: unknown,
+  reasoning?: { effort: ReasoningEffort },
+  modelOverride?: string
+) {
   return {
-    model: deepResearchModel,
+    model: modelOverride || deepResearchModel,
     input,
     tools: [{ type: 'web_search_preview' }],
     tool_choice: 'auto',
@@ -872,11 +887,11 @@ function buildDeepResearchBody(input: unknown, reasoning?: { effort: ReasoningEf
 
 export async function startDeepResearch(
   input: unknown,
-  opts?: { timeoutMs?: number; reasoning?: { effort: ReasoningEffort } }
+  opts?: { timeoutMs?: number; reasoning?: { effort: ReasoningEffort }; model?: string }
 ): Promise<{ responseId: string | null; status: string | null; data: unknown }> {
   const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
   const createTimeoutMs = Math.min(60_000, timeoutBudgetMs);
-  const body = buildDeepResearchBody(input, opts?.reasoning);
+  const body = buildDeepResearchBody(input, opts?.reasoning, opts?.model);
   const createBody = { ...body, background: true } as Record<string, unknown>;
   const data = await withDeepResearchSlot(async () =>
     request('/responses', createBody, {
@@ -1010,4 +1025,38 @@ export async function summarizeForReport(
   );
 
   return extractOutputText(data).trim();
+}
+
+export async function runOpenAiReasoningStep(params: {
+  prompt: string;
+  maxOutputTokens: number;
+  model?: string;
+  previousResponseId?: string | null;
+  timeoutMs?: number;
+  useWebSearch?: boolean;
+}): Promise<{ text: string; responseId: string | null; usage?: unknown }> {
+  const body: Record<string, unknown> = {
+    model: params.model || refinerModel,
+    input: params.prompt,
+    max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
+    ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})
+  };
+  if (params.useWebSearch ?? true) {
+    body.tools = [{ type: 'web_search_preview' }];
+    body.tool_choice = 'auto';
+  }
+
+  const data = await request(
+    '/responses',
+    body,
+    params.timeoutMs
+      ? { requestTimeoutMs: params.timeoutMs, headersTimeoutMs: params.timeoutMs, bodyTimeoutMs: params.timeoutMs }
+      : undefined
+  );
+  const typed = data as { id?: string; usage?: unknown };
+  return {
+    text: extractOutputText(data).trim(),
+    responseId: typeof typed.id === 'string' ? typed.id : null,
+    usage: typed.usage
+  };
 }

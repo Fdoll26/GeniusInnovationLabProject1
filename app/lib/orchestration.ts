@@ -9,6 +9,7 @@ import { sendReportEmail } from './email-sender';
 import type { SessionState } from './session-state';
 import { getUserSettings } from './user-settings-repo';
 import { pool } from './db';
+import { getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
 
 const providerQueueKeys = {
   openai: 'deep_research_queue_openai_v1',
@@ -426,191 +427,140 @@ async function withProviderQueueLock<T>(
   }
 }
 
-async function advanceOpenAiRunning(result: { session_id: string; external_id?: string | null }) {
-  const nowIso = new Date().toISOString();
-  const responseId = result.external_id ?? null;
-  if (!responseId) {
-    return { terminal: false as const };
-  }
-
-  const session = await getSessionById(result.session_id);
-  if (!session) {
-    return { terminal: false as const };
-  }
-  const settings = await getUserSettings(session.user_id);
-  try {
-    const polled = await pollDeepResearch(responseId, { timeoutMs: settings.openai_timeout_minutes * 60_000 });
-    await upsertProviderResult({
-      sessionId: result.session_id,
-      provider: 'openai',
-      status: 'running',
-      externalId: responseId,
-      externalStatus: polled.status,
-      lastPolledAt: nowIso
-    });
-    if (polled.status && ['completed', 'failed', 'cancelled', 'incomplete'].includes(polled.status)) {
-      await upsertProviderResult({
-        sessionId: result.session_id,
-        provider: 'openai',
-        status: polled.status === 'completed' ? 'completed' : 'failed',
-        outputText: polled.status === 'completed' ? getResponseOutputText(polled.data) : null,
-        sources: polled.status === 'completed' ? (getResponseSources(polled.data) ?? null) : null,
-        completedAt: nowIso,
-        externalStatus: polled.status,
-        lastPolledAt: nowIso
-      });
-      return { terminal: true as const, sessionId: result.session_id };
-    }
-  } catch (error) {
-    console.error('OpenAI poll failed', error);
-  }
-  return { terminal: false as const };
-}
-
-async function startOpenAiFromQueue(params: {
+async function advanceProviderFromQueue(params: {
+  provider: 'openai' | 'gemini';
   sessionId: string;
   refinedPrompt: string;
-  settings: Awaited<ReturnType<typeof getUserSettings>>;
-  opts?: { stub?: boolean; stubOpenAI?: boolean; skipOpenAI?: boolean };
+  userId: string;
+  opts?: {
+    stub?: boolean;
+    stubOpenAI?: boolean;
+    stubGemini?: boolean;
+    skipOpenAI?: boolean;
+    skipGemini?: boolean;
+  };
 }) {
   const nowIso = new Date().toISOString();
-  if (params.opts?.skipOpenAI) {
+  const skip = params.provider === 'openai' ? params.opts?.skipOpenAI : params.opts?.skipGemini;
+  if (skip) {
     await upsertProviderResult({
       sessionId: params.sessionId,
-      provider: 'openai',
+      provider: params.provider,
       status: 'skipped',
-      outputText: 'OpenAI run skipped (debug)',
+      outputText: `${params.provider} run skipped (debug)`,
       completedAt: nowIso,
       lastPolledAt: nowIso
     });
-    return { sessionId: params.sessionId, terminal: true as const };
+    return { terminal: true as const };
+  }
+
+  if (!process.env.DATABASE_URL) {
+    const settings = await getUserSettings(params.userId);
+    try {
+      if (params.provider === 'openai') {
+        const started = await startResearchJob(params.refinedPrompt, {
+          stub: params.opts?.stubOpenAI ?? params.opts?.stub,
+          timeoutMs: settings.openai_timeout_minutes * 60_000,
+          maxSources: settings.max_sources,
+          reasoningLevel: settings.reasoning_level
+        });
+        await upsertProviderResult({
+          sessionId: params.sessionId,
+          provider: 'openai',
+          status: 'completed',
+          outputText: getResponseOutputText(started.data),
+          sources: getResponseSources(started.data) ?? null,
+          completedAt: new Date().toISOString(),
+          lastPolledAt: new Date().toISOString()
+        });
+      } else {
+        const out = await runGemini(params.refinedPrompt, {
+          stub: params.opts?.stubGemini ?? params.opts?.stub,
+          timeoutMs: settings.gemini_timeout_minutes * 60_000,
+          maxSources: settings.max_sources
+        });
+        await upsertProviderResult({
+          sessionId: params.sessionId,
+          provider: 'gemini',
+          status: 'completed',
+          outputText: out.outputText,
+          sources: out.sources ?? null,
+          completedAt: new Date().toISOString(),
+          lastPolledAt: new Date().toISOString()
+        });
+      }
+      return { terminal: true as const };
+    } catch (error) {
+      await upsertProviderResult({
+        sessionId: params.sessionId,
+        provider: params.provider,
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Provider error',
+        completedAt: new Date().toISOString(),
+        lastPolledAt: new Date().toISOString()
+      });
+      return { terminal: true as const };
+    }
+  }
+
+  let snapshot = await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  const shouldStart =
+    !snapshot ||
+    snapshot.run.state === 'FAILED' ||
+    snapshot.run.state === 'DONE';
+  if (shouldStart) {
+    await startRun({
+      sessionId: params.sessionId,
+      userId: params.userId,
+      question: params.refinedPrompt,
+      provider: params.provider,
+      allowClarifications: false
+    });
+    snapshot = await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  }
+  if (!snapshot) {
+    await upsertProviderResult({
+      sessionId: params.sessionId,
+      provider: params.provider,
+      status: 'failed',
+      errorMessage: 'Failed to initialize provider research run',
+      completedAt: nowIso,
+      lastPolledAt: nowIso
+    });
+    return { terminal: true as const };
   }
 
   await upsertProviderResult({
     sessionId: params.sessionId,
-    provider: 'openai',
+    provider: params.provider,
     status: 'running',
     startedAt: nowIso,
     lastPolledAt: nowIso
   });
 
-  const started = await startResearchJob(params.refinedPrompt, {
-    stub: params.opts?.stubOpenAI ?? params.opts?.stub,
-    timeoutMs: params.settings.openai_timeout_minutes * 60_000,
-    maxSources: params.settings.max_sources,
-    reasoningLevel: params.settings.reasoning_level
-  });
-
-  if (!started.responseId && started.status !== 'completed') {
+  const tickResult = await tick(snapshot.run.id);
+  const completedSnapshot = await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  if (tickResult.done) {
     await upsertProviderResult({
       sessionId: params.sessionId,
-      provider: 'openai',
-      status: 'failed',
-      errorMessage: 'OpenAI did not return a response id',
-      completedAt: nowIso,
-      lastPolledAt: nowIso
+      provider: params.provider,
+      status: tickResult.state === 'FAILED' ? 'failed' : 'completed',
+      outputText: completedSnapshot?.run?.synthesized_report_md ?? null,
+      sources: completedSnapshot?.sources ?? null,
+      errorMessage: tickResult.state === 'FAILED' ? completedSnapshot?.run?.error_message ?? 'Provider run failed' : null,
+      completedAt: new Date().toISOString(),
+      lastPolledAt: new Date().toISOString()
     });
-    return { sessionId: params.sessionId, terminal: true as const };
-  }
-
-  if (started.responseId) {
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: 'openai',
-      status: 'running',
-      externalId: started.responseId,
-      externalStatus: started.status,
-      lastPolledAt: nowIso
-    });
-  }
-
-  if (started.status === 'completed') {
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: 'openai',
-      status: 'completed',
-      outputText: getResponseOutputText(started.data),
-      sources: getResponseSources(started.data) ?? null,
-      completedAt: nowIso,
-      externalId: started.responseId ?? null,
-      externalStatus: 'completed',
-      lastPolledAt: nowIso
-    });
-    return { sessionId: params.sessionId, terminal: true as const };
-  }
-
-  return { sessionId: params.sessionId, terminal: false as const };
-}
-
-async function startGeminiFromQueue(params: {
-  sessionId: string;
-  refinedPrompt: string;
-  settings: Awaited<ReturnType<typeof getUserSettings>>;
-  opts?: { stub?: boolean; stubGemini?: boolean; skipGemini?: boolean };
-}) {
-  const startedIso = new Date().toISOString();
-  if (params.opts?.skipGemini) {
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: 'gemini',
-      status: 'skipped',
-      outputText: 'Gemini run skipped (debug)',
-      completedAt: startedIso,
-      lastPolledAt: startedIso
-    });
-    return { sessionId: params.sessionId, terminal: true as const };
+    return { terminal: true as const };
   }
 
   await upsertProviderResult({
     sessionId: params.sessionId,
-    provider: 'gemini',
+    provider: params.provider,
     status: 'running',
-    startedAt: startedIso,
-    lastPolledAt: startedIso
+    lastPolledAt: new Date().toISOString()
   });
-
-  try {
-    const geminiResult = await runGemini(params.refinedPrompt, {
-      stub: params.opts?.stubGemini ?? params.opts?.stub,
-      timeoutMs: params.settings.gemini_timeout_minutes * 60_000,
-      maxSources: params.settings.max_sources
-    });
-    const completedIso = new Date().toISOString();
-    if (!geminiResult.outputText.trim()) {
-      await upsertProviderResult({
-        sessionId: params.sessionId,
-        provider: 'gemini',
-        status: 'failed',
-        errorMessage: 'Gemini returned empty output',
-        sources: geminiResult.sources ?? null,
-        completedAt: completedIso,
-        lastPolledAt: completedIso
-      });
-      return { sessionId: params.sessionId, terminal: true as const };
-    }
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: 'gemini',
-      status: 'completed',
-      outputText: geminiResult.outputText,
-      sources: geminiResult.sources ?? null,
-      completedAt: completedIso,
-      lastPolledAt: completedIso
-    });
-    return { sessionId: params.sessionId, terminal: true as const };
-  } catch (error) {
-    console.error('Gemini research failed', error);
-    const completedIso = new Date().toISOString();
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: 'gemini',
-      status: 'failed',
-      errorMessage: error instanceof Error ? error.message : 'Gemini error',
-      completedAt: completedIso,
-      lastPolledAt: completedIso
-    });
-    return { sessionId: params.sessionId, terminal: true as const };
-  }
+  return { terminal: false as const };
 }
 
 async function processProviderQueue(
@@ -626,59 +576,32 @@ async function processProviderQueue(
   const sessionsToSync = new Set<string>();
   const didWork = await withProviderQueueLock(provider, async () => {
     const running = await getRunningProviderResult(provider);
-    if (running) {
-      if (provider !== 'openai') {
-        return true;
-      }
-      const advanced = await advanceOpenAiRunning(running);
-      if (!advanced.terminal) {
-        return true;
-      }
-      sessionsToSync.add(advanced.sessionId);
-      // If the running job finished, immediately try to start the next queued job.
-    }
+    const target = running ?? (await getNextQueuedProviderResult(provider));
+    if (!target) return false;
 
-    const didAdvanceRunning = sessionsToSync.size > 0;
-    const nextQueued = await getNextQueuedProviderResult(provider);
-    if (!nextQueued) {
-      return didAdvanceRunning;
-    }
-
-    const session = await getSessionById(nextQueued.session_id);
+    const session = await getSessionById(target.session_id);
     if (!session?.refined_prompt) {
       await upsertProviderResult({
-        sessionId: nextQueued.session_id,
+        sessionId: target.session_id,
         provider,
         status: 'failed',
         errorMessage: 'Refined prompt missing',
         completedAt: new Date().toISOString()
       });
-      sessionsToSync.add(nextQueued.session_id);
-      return true;
-    }
-    const settings = await getUserSettings(session.user_id);
-
-    if (provider === 'openai') {
-      const started = await startOpenAiFromQueue({
-        sessionId: nextQueued.session_id,
-        refinedPrompt: session.refined_prompt,
-        settings,
-        opts
-      });
-      if (started.terminal) {
-        sessionsToSync.add(started.sessionId);
-      }
+      sessionsToSync.add(target.session_id);
       return true;
     }
 
-    const started = await startGeminiFromQueue({
-      sessionId: nextQueued.session_id,
+    const result = await advanceProviderFromQueue({
+      provider,
+      sessionId: target.session_id,
       refinedPrompt: session.refined_prompt,
-      settings,
+      userId: session.user_id,
       opts
     });
-    if (started.terminal) {
-      sessionsToSync.add(started.sessionId);
+
+    if (result.terminal) {
+      sessionsToSync.add(target.session_id);
     }
     return true;
   });
@@ -702,7 +625,7 @@ async function kickProviderQueues(opts?: {
   await Promise.all([processProviderQueue('openai', opts), processProviderQueue('gemini', opts)]);
 }
 
-export async function runProviders(
+async function runProvidersLegacy(
   sessionId: string,
   opts?: {
     stub?: boolean;
@@ -714,96 +637,62 @@ export async function runProviders(
     skipGemini?: boolean;
   }
 ) {
-  const didRun = await withSessionRunLock(sessionId, async () => {
-    const session = await getSessionById(sessionId);
-    if (!session?.refined_prompt) {
-      throw new Error('Refined prompt missing');
-    }
-    await updateSessionState({ sessionId, state: 'running_research' });
+  const nowIso = new Date().toISOString();
+  const existingResults = await listProviderResults(sessionId);
+  const existingByProvider = new Map(existingResults.map((r) => [r.provider, r]));
 
-    const nowIso = new Date().toISOString();
-    const existingResults = await listProviderResults(sessionId);
-    const existingByProvider = new Map(existingResults.map((r) => [r.provider, r]));
-
-    const existingOpenAi = existingByProvider.get('openai');
-    if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && !opts?.skipOpenAI) {
-      await upsertProviderResult({
-        sessionId,
-        provider: 'openai',
-        status: 'queued',
-        queuedAt: nowIso,
-        lastPolledAt: nowIso
-      });
-    }
-    if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed') {
-      await upsertProviderResult({
-        sessionId,
-        provider: 'openai',
-        status: 'skipped',
-        outputText: 'OpenAI run skipped (debug)',
-        completedAt: nowIso,
-        lastPolledAt: nowIso
-      });
-    }
-
-    const existingGemini = existingByProvider.get('gemini');
-    if (existingGemini?.status !== 'completed' && existingGemini?.status !== 'running' && !opts?.skipGemini) {
-      await upsertProviderResult({
-        sessionId,
-        provider: 'gemini',
-        status: 'queued',
-        queuedAt: nowIso,
-        lastPolledAt: nowIso
-      });
-    }
-    if (opts?.skipGemini && existingGemini?.status !== 'completed') {
-      await upsertProviderResult({
-        sessionId,
-        provider: 'gemini',
-        status: 'skipped',
-        outputText: 'Gemini run skipped (debug)',
-        completedAt: nowIso,
-        lastPolledAt: nowIso
-      });
-    }
-
-    await kickProviderQueues(opts);
-  });
-
-  if (didRun === null) {
-    await syncSession(sessionId, opts);
-    return;
+  const existingOpenAi = existingByProvider.get('openai');
+  if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && !opts?.skipOpenAI) {
+    await upsertProviderResult({
+      sessionId,
+      provider: 'openai',
+      status: 'queued',
+      queuedAt: nowIso,
+      lastPolledAt: nowIso
+    });
   }
+  if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed') {
+    await upsertProviderResult({
+      sessionId,
+      provider: 'openai',
+      status: 'skipped',
+      outputText: 'OpenAI run skipped (debug)',
+      completedAt: nowIso,
+      lastPolledAt: nowIso
+    });
+  }
+
+  const existingGemini = existingByProvider.get('gemini');
+  if (existingGemini?.status !== 'completed' && existingGemini?.status !== 'running' && !opts?.skipGemini) {
+    await upsertProviderResult({
+      sessionId,
+      provider: 'gemini',
+      status: 'queued',
+      queuedAt: nowIso,
+      lastPolledAt: nowIso
+    });
+  }
+  if (opts?.skipGemini && existingGemini?.status !== 'completed') {
+    await upsertProviderResult({
+      sessionId,
+      provider: 'gemini',
+      status: 'skipped',
+      outputText: 'Gemini run skipped (debug)',
+      completedAt: nowIso,
+      lastPolledAt: nowIso
+    });
+  }
+  await kickProviderQueues(opts);
 }
 
-export async function syncSession(
+async function syncSessionLegacy(
   sessionId: string,
+  session: NonNullable<Awaited<ReturnType<typeof getSessionById>>>,
   opts?: { stub?: boolean; stubPdf?: boolean; stubEmail?: boolean }
 ) {
-  const session = await getSessionById(sessionId);
-  if (!session) {
-    return;
-  }
   const settings = await getUserSettings(session.user_id);
   const nowIso = new Date().toISOString();
   const queuedStaleMs = Math.max(settings.openai_timeout_minutes, settings.gemini_timeout_minutes) * 60_000 + 5 * 60_000;
-
-  if (session.state === 'aggregating') {
-    const results = await listProviderResults(sessionId);
-    const openai = results.find((r) => r.provider === 'openai');
-    const gemini = results.find((r) => r.provider === 'gemini');
-    const openaiFailed = openai?.status === 'failed' || openai?.status === 'skipped';
-    const geminiFailed = gemini?.status === 'failed' || gemini?.status === 'skipped';
-    await finalizeReport(sessionId, openaiFailed, geminiFailed, opts);
-    await kickProviderQueues(opts);
-    return;
-  }
-
-  if (session.state !== 'running_research') {
-    await kickProviderQueues(opts);
-    return;
-  }
-
   const results = await listProviderResults(sessionId);
   const openai = results.find((r) => r.provider === 'openai');
   const gemini = results.find((r) => r.provider === 'gemini');
@@ -830,49 +719,6 @@ export async function syncSession(
     maybeRepairQueued('gemini', gemini)
   ]);
 
-  if (openai?.status === 'running' && openai.external_id) {
-    try {
-      const polled = await pollDeepResearch(openai.external_id, { timeoutMs: settings.openai_timeout_minutes * 60_000 });
-      await upsertProviderResult({
-        sessionId,
-        provider: 'openai',
-        status: 'running',
-        externalId: openai.external_id,
-        externalStatus: polled.status,
-        lastPolledAt: nowIso
-      });
-      if (polled.status && ['completed', 'failed', 'cancelled', 'incomplete'].includes(polled.status)) {
-        await upsertProviderResult({
-          sessionId,
-          provider: 'openai',
-          status: polled.status === 'completed' ? 'completed' : 'failed',
-          outputText: polled.status === 'completed' ? getResponseOutputText(polled.data) : null,
-          sources: polled.status === 'completed' ? (getResponseSources(polled.data) ?? null) : null,
-          completedAt: nowIso,
-          externalStatus: polled.status,
-          lastPolledAt: nowIso
-        });
-      }
-    } catch (error) {
-      // Ignore transient polling errors; next poll will try again.
-      console.error('OpenAI poll failed', error);
-    }
-  }
-
-  const staleGeminiMs = settings.gemini_timeout_minutes * 60_000 + 60_000;
-  if (gemini?.status === 'running' && gemini.started_at) {
-    const startedAtMs = new Date(gemini.started_at).getTime();
-    if (Date.now() - startedAtMs > staleGeminiMs) {
-      await upsertProviderResult({
-        sessionId,
-        provider: 'gemini',
-        status: 'failed',
-        errorMessage: 'Gemini run timed out (likely interrupted). Retry to run again.',
-        completedAt: nowIso
-      });
-    }
-  }
-
   const updatedResults = await listProviderResults(sessionId);
   const stillInFlight = updatedResults.some((r) => r.status === 'running' || r.status === 'queued');
   const terminal = new Set(['completed', 'failed', 'skipped']);
@@ -885,8 +731,64 @@ export async function syncSession(
     const geminiFailed = gemini2?.status === 'failed' || gemini2?.status === 'skipped';
     await finalizeReport(sessionId, openaiFailed, geminiFailed, opts);
   }
+  await kickProviderQueues(opts as any);
+}
 
-  await kickProviderQueues(opts);
+export async function runProviders(
+  sessionId: string,
+  opts?: {
+    stub?: boolean;
+    stubOpenAI?: boolean;
+    stubGemini?: boolean;
+    stubEmail?: boolean;
+    stubPdf?: boolean;
+    skipOpenAI?: boolean;
+    skipGemini?: boolean;
+  }
+) {
+  const didRun = await withSessionRunLock(sessionId, async () => {
+    await runProvidersLegacy(sessionId, opts);
+  });
+  if (didRun === null) return;
+
+  const results = await listProviderResults(sessionId);
+  const terminal = new Set(['completed', 'failed', 'skipped']);
+  const allTerminal = results.length >= 2 && results.every((r) => terminal.has(r.status));
+  const stillInFlight = results.some((r) => r.status === 'running' || r.status === 'queued');
+  if (!stillInFlight && allTerminal) {
+    await updateSessionState({ sessionId, state: 'aggregating' });
+    const openai = results.find((r) => r.provider === 'openai');
+    const gemini = results.find((r) => r.provider === 'gemini');
+    const openaiFailed = openai?.status === 'failed' || openai?.status === 'skipped';
+    const geminiFailed = gemini?.status === 'failed' || gemini?.status === 'skipped';
+    await finalizeReport(sessionId, openaiFailed, geminiFailed, opts);
+  }
+}
+
+export async function syncSession(
+  sessionId: string,
+  opts?: { stub?: boolean; stubPdf?: boolean; stubEmail?: boolean }
+) {
+  const session = await getSessionById(sessionId);
+  if (!session) {
+    return;
+  }
+  if (session.state === 'aggregating') {
+    const results = await listProviderResults(sessionId);
+    const openai = results.find((r) => r.provider === 'openai');
+    const gemini = results.find((r) => r.provider === 'gemini');
+    const openaiFailed = openai?.status === 'failed' || openai?.status === 'skipped';
+    const geminiFailed = gemini?.status === 'failed' || gemini?.status === 'skipped';
+    await finalizeReport(sessionId, openaiFailed, geminiFailed, opts);
+    return;
+  }
+  if (!process.env.DATABASE_URL) {
+    await syncSessionLegacy(sessionId, session, opts);
+    return;
+  }
+  if (session.state === 'running_research') {
+    await runProviders(sessionId, opts);
+  }
 }
 
 export async function finalizeReport(
@@ -959,19 +861,30 @@ async function finalizeReportUnlocked(
   let finalState: SessionState =
     openaiFailed && geminiFailed ? 'failed' : openaiFailed || geminiFailed ? 'partial' : 'completed';
 
+  const [openaiResearch, geminiResearch] = await Promise.all([
+    getSessionResearchSnapshotByProvider(sessionId, 'openai'),
+    getSessionResearchSnapshotByProvider(sessionId, 'gemini')
+  ]);
+  const runReportOpenai = openaiResearch?.run?.synthesized_report_md ?? null;
+  const runReportGemini = geminiResearch?.run?.synthesized_report_md ?? null;
+  const openaiRunSourcesRaw = (openaiResearch?.sources ?? []).map((s) => ({ url: s.url || '', title: s.title || undefined }));
+  const geminiRunSourcesRaw = (geminiResearch?.sources ?? []).map((s) => ({ url: s.url || '', title: s.title || undefined }));
+
   const accessedAt = new Date().toISOString();
-  const openaiSources = extractLinksFromText(openaiResult?.output_text ?? '');
-  const geminiSourcesRaw = extractLinksFromText(geminiResult?.output_text ?? '');
+  const openaiSources = runReportOpenai ? openaiRunSourcesRaw : extractLinksFromText(openaiResult?.output_text ?? '');
+  const geminiSourcesRaw = runReportGemini ? geminiRunSourcesRaw : extractLinksFromText(geminiResult?.output_text ?? '');
 
   const globalRefMap = new Map<string, number>();
-  const openaiRefs = openaiSources.map((source, index) => {
-    const n = index + 1;
-    globalRefMap.set(source.url, n);
-    return { n, ...source, accessedAt };
-  });
+  const openaiRefs = openaiSources
+    .filter((source) => source.url)
+    .map((source, index) => {
+      const n = index + 1;
+      globalRefMap.set(source.url, n);
+      return { n, ...source, accessedAt };
+    });
   const geminiRefs: Array<{ n: number; url: string; title?: string; accessedAt: string }> = [];
   for (const source of geminiSourcesRaw) {
-    if (globalRefMap.has(source.url)) {
+    if (!source.url || globalRefMap.has(source.url)) {
       continue;
     }
     const n = globalRefMap.size + 1;
@@ -979,12 +892,78 @@ async function finalizeReportUnlocked(
     geminiRefs.push({ n, ...source, accessedAt });
   }
 
-  const openaiTextWithRefs = openaiResult?.output_text
-    ? replaceLinksWithRefs(openaiResult.output_text, globalRefMap)
-    : null;
-  const geminiTextWithRefs = geminiResult?.output_text
-    ? replaceLinksWithRefs(geminiResult.output_text, globalRefMap)
-    : null;
+  const openaiTextWithRefs = runReportOpenai
+    ? replaceLinksWithRefs(runReportOpenai, globalRefMap)
+    : openaiResult?.output_text
+      ? replaceLinksWithRefs(openaiResult.output_text, globalRefMap)
+      : null;
+  const geminiTextWithRefs = runReportGemini
+    ? replaceLinksWithRefs(runReportGemini, globalRefMap)
+    : geminiResult?.output_text
+      ? replaceLinksWithRefs(geminiResult.output_text, globalRefMap)
+      : null;
+
+  const unifiedToc = [
+    '## Table of Contents',
+    '1. OpenAI Provider Report',
+    '2. Gemini Provider Report',
+    '3. Provider Comparison',
+    '4. Unified Sources'
+  ].join('\n');
+  const providerComparison = [
+    '## Provider Comparison',
+    `- OpenAI status: ${openaiResult?.status ?? 'unknown'}`,
+    `- Gemini status: ${geminiResult?.status ?? 'unknown'}`,
+    '- Agreement: Both provider reports were merged and sources were deduplicated by URL.',
+    '- Disagreement handling: Differences are preserved in separate provider sections for transparency.'
+  ].join('\n');
+  const unifiedSourcesMd = [
+    '## Unified Sources',
+    ...[...globalRefMap.entries()].map(([url, n]) => `[${n}] ${url}`)
+  ].join('\n');
+  const unifiedReport = [
+    '# Aggregated Deep Research Report',
+    unifiedToc,
+    '## OpenAI Provider Report',
+    openaiTextWithRefs || 'No OpenAI report available.',
+    '## Gemini Provider Report',
+    geminiTextWithRefs || 'No Gemini report available.',
+    providerComparison,
+    unifiedSourcesMd
+  ].join('\n\n');
+
+  const hasResearchMaterial = Boolean(
+    (runReportOpenai && runReportOpenai.trim()) ||
+      (runReportGemini && runReportGemini.trim()) ||
+      (openaiTextWithRefs && openaiTextWithRefs.trim()) ||
+      (geminiTextWithRefs && geminiTextWithRefs.trim())
+  );
+
+  if (!hasResearchMaterial) {
+    finalState = 'failed';
+    const emptySummary = 'Research failed before any usable output was generated.';
+    const report =
+      existingReport && existingReport.email_status !== 'sent'
+        ? ((await updateReportContent({ reportId: existingReport.id, summary: emptySummary, pdfBuffer: null })) ?? existingReport)
+        : await createReport({
+            sessionId,
+            summary: emptySummary,
+            pdfBuffer: null,
+            emailStatus: 'failed'
+          });
+
+    await updateSessionState({
+      sessionId,
+      state: finalState,
+      completedAt: new Date().toISOString()
+    });
+    await updateReportEmail({
+      reportId: report.id,
+      emailStatus: 'failed',
+      emailError: 'No research output generated; report email skipped.'
+    });
+    return;
+  }
 
   const includeRefs = settings.report_include_refs_in_summary;
   type SummaryRef = { n: number; title?: string; url: string; accessedAt?: string };
@@ -1004,7 +983,10 @@ async function finalizeReportUnlocked(
   let finalOpenaiSummary = 'No OpenAI result available.';
   let finalGeminiSummary = 'No Gemini result available.';
 
-  if (settings.report_summary_mode === 'one') {
+  if (runReportOpenai || runReportGemini) {
+    finalOpenaiSummary = unifiedReport;
+    finalGeminiSummary = '';
+  } else if (settings.report_summary_mode === 'one') {
     const combinedText = [openaiTextWithRefs, geminiTextWithRefs].filter(Boolean).join('\n\n');
     const combinedRefs = [...openaiRefs, ...geminiRefs];
     finalOpenaiSummary = combinedText

@@ -4,6 +4,8 @@ export type ModelProvider = 'openai' | 'gemini';
 export type ReasoningLevel = 'low' | 'high';
 export type ReportSummaryMode = 'one' | 'two';
 export type ThemeMode = 'light' | 'dark';
+export type ResearchMode = 'native' | 'custom';
+export type ResearchDepth = 'light' | 'standard' | 'deep';
 
 export type UserSettings = {
   user_id: string;
@@ -16,6 +18,13 @@ export type UserSettings = {
   report_summary_mode: ReportSummaryMode;
   report_include_refs_in_summary: boolean;
   theme: ThemeMode;
+  research_provider: ModelProvider;
+  research_mode: ResearchMode;
+  research_depth: ResearchDepth;
+  research_max_steps: number;
+  research_target_sources_per_step: number;
+  research_max_total_sources: number;
+  research_max_tokens_per_step: number;
 };
 
 export type UserSettingsUpdate = Partial<Omit<UserSettings, 'user_id'>>;
@@ -29,7 +38,14 @@ const DEFAULT_SETTINGS: Omit<UserSettings, 'user_id'> = {
   reasoning_level: 'low',
   report_summary_mode: 'two',
   report_include_refs_in_summary: true,
-  theme: 'light'
+  theme: 'light',
+  research_provider: 'openai',
+  research_mode: 'custom',
+  research_depth: 'standard',
+  research_max_steps: 8,
+  research_target_sources_per_step: 5,
+  research_max_total_sources: 40,
+  research_max_tokens_per_step: 1800
 };
 
 function clampInt(value: unknown, min: number, max: number): number | null {
@@ -56,6 +72,14 @@ function coerceTheme(value: unknown): ThemeMode | null {
   return value === 'light' || value === 'dark' ? value : null;
 }
 
+function coerceResearchMode(value: unknown): ResearchMode | null {
+  return value === 'native' || value === 'custom' ? value : null;
+}
+
+function coerceResearchDepth(value: unknown): ResearchDepth | null {
+  return value === 'light' || value === 'standard' || value === 'deep' ? value : null;
+}
+
 export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate {
   const obj = (update && typeof update === 'object' ? update : {}) as Record<string, unknown>;
   const normalized: UserSettingsUpdate = {};
@@ -66,7 +90,7 @@ export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate
   const summarizeProvider = coerceProvider(obj.summarize_provider);
   if (summarizeProvider) normalized.summarize_provider = summarizeProvider;
 
-  const maxSources = clampInt(obj.max_sources, 1, 20);
+  const maxSources = clampInt(obj.max_sources, 1, 50);
   if (maxSources !== null) normalized.max_sources = maxSources;
 
   const openaiTimeout = clampInt(obj.openai_timeout_minutes, 1, 20);
@@ -87,6 +111,27 @@ export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate
 
   const theme = coerceTheme(obj.theme);
   if (theme) normalized.theme = theme;
+
+  const researchProvider = coerceProvider(obj.research_provider);
+  if (researchProvider) normalized.research_provider = researchProvider;
+
+  const researchMode = coerceResearchMode(obj.research_mode);
+  if (researchMode) normalized.research_mode = researchMode;
+
+  const researchDepth = coerceResearchDepth(obj.research_depth);
+  if (researchDepth) normalized.research_depth = researchDepth;
+
+  const researchMaxSteps = clampInt(obj.research_max_steps, 3, 20);
+  if (researchMaxSteps !== null) normalized.research_max_steps = researchMaxSteps;
+
+  const researchTargetSourcesPerStep = clampInt(obj.research_target_sources_per_step, 1, 20);
+  if (researchTargetSourcesPerStep !== null) normalized.research_target_sources_per_step = researchTargetSourcesPerStep;
+
+  const researchMaxTotalSources = clampInt(obj.research_max_total_sources, 5, 300);
+  if (researchMaxTotalSources !== null) normalized.research_max_total_sources = researchMaxTotalSources;
+
+  const researchMaxTokensPerStep = clampInt(obj.research_max_tokens_per_step, 300, 8000);
+  if (researchMaxTokensPerStep !== null) normalized.research_max_tokens_per_step = researchMaxTokensPerStep;
 
   return normalized;
 }
@@ -123,9 +168,16 @@ export async function upsertUserSettings(userId: string, update: UserSettingsUpd
          report_summary_mode,
          report_include_refs_in_summary,
          theme,
+         research_provider,
+         research_mode,
+         research_depth,
+         research_max_steps,
+         research_target_sources_per_step,
+         research_max_total_sources,
+         research_max_tokens_per_step,
          updated_at
        )
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10, now())
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
        ON CONFLICT (user_id) DO UPDATE SET
          refine_provider = EXCLUDED.refine_provider,
          summarize_provider = EXCLUDED.summarize_provider,
@@ -136,6 +188,13 @@ export async function upsertUserSettings(userId: string, update: UserSettingsUpd
          report_summary_mode = EXCLUDED.report_summary_mode,
          report_include_refs_in_summary = EXCLUDED.report_include_refs_in_summary,
          theme = EXCLUDED.theme,
+         research_provider = EXCLUDED.research_provider,
+         research_mode = EXCLUDED.research_mode,
+         research_depth = EXCLUDED.research_depth,
+         research_max_steps = EXCLUDED.research_max_steps,
+         research_target_sources_per_step = EXCLUDED.research_target_sources_per_step,
+         research_max_total_sources = EXCLUDED.research_max_total_sources,
+         research_max_tokens_per_step = EXCLUDED.research_max_tokens_per_step,
          updated_at = now()
        RETURNING *`,
       [
@@ -149,6 +208,14 @@ export async function upsertUserSettings(userId: string, update: UserSettingsUpd
         next.report_summary_mode,
         next.report_include_refs_in_summary,
         next.theme
+        ,
+        next.research_provider,
+        next.research_mode,
+        next.research_depth,
+        next.research_max_steps,
+        next.research_target_sources_per_step,
+        next.research_max_total_sources,
+        next.research_max_tokens_per_step
       ]
     );
     return rows[0];

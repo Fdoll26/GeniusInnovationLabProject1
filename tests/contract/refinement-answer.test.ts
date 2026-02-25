@@ -31,7 +31,15 @@ vi.mock('../../app/lib/user-settings-repo', () => ({
     gemini_timeout_minutes: 10,
     reasoning_level: 'low',
     report_summary_mode: 'two',
-    report_include_refs_in_summary: true
+    report_include_refs_in_summary: true,
+    theme: 'light',
+    research_provider: 'openai',
+    research_mode: 'custom',
+    research_depth: 'standard',
+    research_max_steps: 8,
+    research_target_sources_per_step: 5,
+    research_max_total_sources: 40,
+    research_max_tokens_per_step: 1800
   }))
 }));
 
