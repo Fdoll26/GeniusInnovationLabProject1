@@ -128,6 +128,8 @@ vi.mock('../../app/lib/research-orchestrator', () => ({
 }));
 
 vi.mock('../../app/lib/research-run-repo', () => ({
+  claimQueuedResearchRun: vi.fn(async () => true),
+  markResearchRunQueued: vi.fn(async () => true),
   updateResearchRun: vi.fn(async () => undefined)
 }));
 

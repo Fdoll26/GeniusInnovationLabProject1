@@ -22,7 +22,7 @@ export function createLaneQueue(params: {
   }
 
   const queue: LaneQueueEntry[] = [];
-  const pendingByIdempotencyKey = new Map<string, Promise<LaneTaskResult>>();
+  const pendingByJobId = new Map<string, Promise<LaneTaskResult>>();
   let activeWorkers = 0;
 
   const drain = () => {
@@ -40,7 +40,7 @@ export function createLaneQueue(params: {
           entry.reject(error);
         } finally {
           activeWorkers -= 1;
-          pendingByIdempotencyKey.delete(entry.job.idempotencyKey);
+          pendingByJobId.delete(entry.job.jobId);
           drain();
         }
       })();
@@ -57,7 +57,7 @@ export function createLaneQueue(params: {
         throw new Error(`Lane ${name} rejected provider ${job.provider}; expected ${provider}`);
       }
 
-      const existing = pendingByIdempotencyKey.get(job.idempotencyKey);
+      const existing = pendingByJobId.get(job.jobId);
       if (existing) {
         return existing;
       }
@@ -66,12 +66,12 @@ export function createLaneQueue(params: {
         queue.push({ job, task, resolve, reject });
         drain();
       });
-      pendingByIdempotencyKey.set(job.idempotencyKey, promise);
+      pendingByJobId.set(job.jobId, promise);
       return promise;
     },
     resetForTests() {
       queue.length = 0;
-      pendingByIdempotencyKey.clear();
+      pendingByJobId.clear();
       activeWorkers = 0;
     }
   };

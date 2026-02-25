@@ -11,7 +11,7 @@ import { getUserSettings } from './user-settings-repo';
 import { pool } from './db';
 import { getResearchSnapshotByRunId, getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
 import { parseDeepResearchJobPayload, type DeepResearchJobPayload } from './deep-research-job';
-import { updateResearchRun } from './research-run-repo';
+import { claimQueuedResearchRun, markResearchRunQueued, updateResearchRun } from './research-run-repo';
 import { enqueueOpenAiLaneJob } from './queue/openai';
 import { enqueueGeminiLaneJob } from './queue/gemini';
 
@@ -390,7 +390,7 @@ function buildDeepResearchJob(params: {
     modelRunId: params.modelRunId,
     provider: params.provider,
     attempt: params.attempt,
-    idempotencyKey: `${params.provider}:${params.topicId}:${params.modelRunId}:${params.attempt}`
+    jobId: `${params.provider}:${params.modelRunId}:${params.attempt}`
   });
 }
 
@@ -405,14 +405,14 @@ async function processDeepResearchJob(params: {
     modelRunId: job.modelRunId,
     provider: job.provider,
     stepId,
-    jobId: job.idempotencyKey,
+    jobId: job.jobId,
     attempt: job.attempt
   };
 
   logDeepResearchTransition('received', { ...logContext, status: 'running' });
 
   if (!snapshot) {
-    const errorMessage = `ModelRun ${job.modelRunId} not found for job ${job.idempotencyKey}`;
+    const errorMessage = `ModelRun ${job.modelRunId} not found for job ${job.jobId}`;
     await upsertProviderResult({
       sessionId: job.topicId,
       modelRunId: job.modelRunId,
@@ -451,6 +451,16 @@ async function processDeepResearchJob(params: {
       lastPolledAt: new Date().toISOString()
     });
     logDeepResearchTransition('guard_failed', { ...logContext, status: 'failed', message: errorMessage });
+    return { terminal: true as const };
+  }
+
+  const claimed = await claimQueuedResearchRun(job.modelRunId);
+  if (!claimed) {
+    logDeepResearchTransition('duplicate_noop', {
+      ...logContext,
+      status: 'skipped',
+      message: 'model run already claimed or not queued'
+    });
     return { terminal: true as const };
   }
 
@@ -711,6 +721,9 @@ async function runProvidersLegacy(
       lastPolledAt: nowIso
     });
     if (session?.refined_prompt) {
+      if (modelRunId) {
+        await markResearchRunQueued(modelRunId);
+      }
       const job = buildDeepResearchJob({
         topicId: sessionId,
         modelRunId: modelRunId ?? `legacy:openai:${sessionId}`,
@@ -734,6 +747,9 @@ async function runProvidersLegacy(
     }
   } else if (existingOpenAi?.status === 'running' && !opts?.skipOpenAI && session?.refined_prompt) {
     const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
+    if (modelRunId) {
+      await markResearchRunQueued(modelRunId);
+    }
     const job = buildDeepResearchJob({
       topicId: sessionId,
       modelRunId: modelRunId ?? `legacy:openai:${sessionId}`,
@@ -781,6 +797,9 @@ async function runProvidersLegacy(
       lastPolledAt: nowIso
     });
     if (session?.refined_prompt) {
+      if (modelRunId) {
+        await markResearchRunQueued(modelRunId);
+      }
       const job = buildDeepResearchJob({
         topicId: sessionId,
         modelRunId: modelRunId ?? `legacy:gemini:${sessionId}`,
@@ -804,6 +823,9 @@ async function runProvidersLegacy(
     }
   } else if (existingGemini?.status === 'running' && !opts?.skipGemini && session?.refined_prompt) {
     const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
+    if (modelRunId) {
+      await markResearchRunQueued(modelRunId);
+    }
     const job = buildDeepResearchJob({
       topicId: sessionId,
       modelRunId: modelRunId ?? `legacy:gemini:${sessionId}`,

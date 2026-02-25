@@ -190,6 +190,32 @@ export async function getResearchRunById(runId: string): Promise<ResearchRunReco
   return rows[0] ?? null;
 }
 
+export async function markResearchRunQueued(runId: string): Promise<boolean> {
+  const rows = await query<{ id: string }>(
+    `UPDATE research_runs
+     SET state = 'PLANNED',
+         updated_at = now()
+     WHERE id = $1
+       AND state NOT IN ('DONE', 'FAILED')
+     RETURNING id`,
+    [runId]
+  );
+  return rows.length > 0;
+}
+
+export async function claimQueuedResearchRun(runId: string): Promise<boolean> {
+  const rows = await query<{ id: string }>(
+    `UPDATE research_runs
+     SET state = 'IN_PROGRESS',
+         updated_at = now()
+     WHERE id = $1
+       AND state = 'PLANNED'
+     RETURNING id`,
+    [runId]
+  );
+  return rows.length > 0;
+}
+
 export async function updateResearchRun(params: {
   runId: string;
   state?: ResearchWorkflowState;

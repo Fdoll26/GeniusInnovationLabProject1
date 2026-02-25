@@ -45,7 +45,7 @@ describe('provider lane queues acceptance', () => {
         provider: 'openai',
         modelRunId: `openai-run-${idx + 1}`,
         attempt: 1,
-        idempotencyKey: `openai:${topicId}:${idx + 1}`
+        jobId: `openai:openai-run-${idx + 1}:1`
       });
       return enqueueOpenAiLaneJob({
         job,
@@ -68,7 +68,7 @@ describe('provider lane queues acceptance', () => {
         provider: 'gemini',
         modelRunId: `gemini-run-${idx + 1}`,
         attempt: 1,
-        idempotencyKey: `gemini:${topicId}:${idx + 1}`
+        jobId: `gemini:gemini-run-${idx + 1}:1`
       });
       return enqueueGeminiLaneJob({
         job,
