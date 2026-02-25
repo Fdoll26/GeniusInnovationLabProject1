@@ -110,6 +110,18 @@ function getGeminiGroundingMetadata(data: unknown): GeminiGroundingMetadata | nu
   return md && typeof md === 'object' ? md : null;
 }
 
+export function extractGeminiGroundingMetadata(data: unknown): {
+  groundingChunks: unknown[];
+  groundingSupports: unknown[];
+} | null {
+  const md = getGeminiGroundingMetadata(data);
+  if (!md) return null;
+  return {
+    groundingChunks: Array.isArray(md.groundingChunks) ? md.groundingChunks : [],
+    groundingSupports: Array.isArray(md.groundingSupports) ? md.groundingSupports : []
+  };
+}
+
 function addInlineUrlCitationsFromGrounding(text: string, md: GeminiGroundingMetadata): string {
   const supports = md.groundingSupports ?? [];
   const chunks = md.groundingChunks ?? [];
@@ -488,7 +500,15 @@ export async function runGeminiReasoningStep(params: {
   model?: string;
   timeoutMs?: number;
   useSearch?: boolean;
-}): Promise<{ text: string; sources?: unknown; usage?: unknown }> {
+  structuredOutput?: {
+    jsonSchema: Record<string, unknown>;
+  };
+}): Promise<{
+  text: string;
+  sources?: unknown;
+  usage?: unknown;
+  groundingMetadata?: { groundingChunks: unknown[]; groundingSupports: unknown[] };
+}> {
   const model = params.model || geminiModel;
   const useSearch = params.useSearch ?? true;
   const data = await request(
@@ -496,7 +516,15 @@ export async function runGeminiReasoningStep(params: {
     {
       ...(useSearch ? { tools: [{ google_search: {} }] } : {}),
       contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
-      generationConfig: { maxOutputTokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))) }
+      generationConfig: {
+        maxOutputTokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
+        ...(params.structuredOutput
+          ? {
+              responseMimeType: 'application/json',
+              responseSchema: params.structuredOutput.jsonSchema
+            }
+          : {})
+      }
     },
     { timeoutMs: params.timeoutMs }
   );
@@ -505,6 +533,14 @@ export async function runGeminiReasoningStep(params: {
   return {
     text: grounding ? addInlineUrlCitationsFromGrounding(text, grounding) : text,
     sources: grounding ?? data,
-    usage: (data as { usageMetadata?: unknown }).usageMetadata
+    usage: (data as { usageMetadata?: unknown }).usageMetadata,
+    ...(grounding
+      ? {
+          groundingMetadata: {
+            groundingChunks: grounding.groundingChunks ?? [],
+            groundingSupports: grounding.groundingSupports ?? []
+          }
+        }
+      : {})
   };
 }

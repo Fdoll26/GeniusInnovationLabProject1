@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS research_steps (
   citation_map_json jsonb,
   next_step_proposal text,
   token_usage_json jsonb,
+  provider_native_json jsonb,
   error_message text,
   started_at timestamptz,
   completed_at timestamptz,

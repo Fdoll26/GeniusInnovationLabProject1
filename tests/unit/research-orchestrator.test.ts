@@ -1,18 +1,58 @@
 // @vitest-environment node
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+const createResearchRun = vi.fn();
 const getResearchRunById = vi.fn();
+const initializePlannedResearchSteps = vi.fn(async () => undefined);
 const listResearchSteps = vi.fn(async () => []);
 const updateResearchRun = vi.fn(async () => undefined);
 const upsertResearchStep = vi.fn(async () => ({ id: 'step-id' }));
 const upsertResearchSource = vi.fn(async () => undefined);
 const upsertResearchEvidence = vi.fn(async () => undefined);
+const generateResearchPlan = vi.fn(async () => ({
+  needsClarification: false,
+  clarifyingQuestions: [],
+  assumptions: ['a1'],
+  plan: {
+    version: '1.0',
+    refined_topic: 'refined topic',
+    assumptions: ['a1'],
+    total_budget: { max_steps: 2, max_sources: 10, max_tokens: 2000 },
+    steps: [
+      {
+        step_index: 0,
+        step_type: 'DEVELOP_RESEARCH_PLAN',
+        title: 'Plan',
+        objective: 'Build plan',
+        target_source_types: ['government'],
+        search_query_pack: ['q1'],
+        budgets: { max_sources: 3, max_tokens: 1000, max_minutes: 5 },
+        deliverables: ['Plan JSON'],
+        done_definition: ['Step complete']
+      },
+      {
+        step_index: 1,
+        step_type: 'DISCOVER_SOURCES_WITH_PLAN',
+        title: 'Discover',
+        objective: 'Find sources',
+        target_source_types: ['news'],
+        search_query_pack: ['q2'],
+        budgets: { max_sources: 4, max_tokens: 1000, max_minutes: 5 },
+        deliverables: ['Source list'],
+        done_definition: ['Step complete']
+      }
+    ],
+    deliverables: ['Report']
+  },
+  brief: { scope: 'test' }
+}));
 
 vi.mock('../../app/lib/research-run-repo', () => ({
-  createResearchRun: vi.fn(),
+  createResearchRun: (...args: any[]) => createResearchRun(...args),
   getLatestResearchRunBySessionId: vi.fn(),
   getLatestResearchRunBySessionProvider: vi.fn(),
   getResearchRunById: (...args: any[]) => getResearchRunById(...args),
+  initializePlannedResearchSteps: (...args: any[]) => initializePlannedResearchSteps(...args),
   listCitationMappings: vi.fn(async () => []),
   listResearchEvidence: vi.fn(async () => []),
   listResearchRunsBySessionId: vi.fn(async () => []),
@@ -51,6 +91,7 @@ vi.mock('../../app/lib/user-settings-repo', () => ({
 }));
 
 vi.mock('../../app/lib/research-provider', () => ({
+  generateResearchPlan: (...args: any[]) => generateResearchPlan(...args),
   executePipelineStep: vi.fn(async () => ({
     step_goal: 'gap check',
     inputs_summary: 'summary',
@@ -69,11 +110,54 @@ vi.mock('../../app/lib/research-provider', () => ({
   }))
 }));
 
-import { tick } from '../../app/lib/research-orchestrator';
+import { startRun, tick } from '../../app/lib/research-orchestrator';
 
 describe('research-orchestrator gap loop', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    createResearchRun.mockResolvedValue({
+      id: 'run0',
+      session_id: 's1',
+      provider: 'openai',
+      mode: 'custom'
+    });
+  });
+
+  it('persists plan_json and inserts planned steps at run start', async () => {
+    const out = await startRun({
+      sessionId: 's1',
+      userId: 'u1',
+      question: 'refined topic',
+      provider: 'openai'
+    });
+
+    expect(out.runId).toBe('run0');
+    expect(generateResearchPlan).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: 'refined topic',
+        provider: 'openai'
+      })
+    );
+    expect(updateResearchRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run0',
+        state: 'PLANNED',
+        plan: expect.objectContaining({
+          version: '1.0'
+        })
+      })
+    );
+    expect(initializePlannedResearchSteps).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run0',
+        steps: expect.arrayContaining([
+          expect.objectContaining({
+            stepIndex: 0,
+            stepType: 'DEVELOP_RESEARCH_PLAN'
+          })
+        ])
+      })
+    );
   });
 
   it('does not loop back when max gap loops already reached', async () => {

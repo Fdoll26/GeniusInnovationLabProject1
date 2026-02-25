@@ -60,6 +60,7 @@ export type ResearchStepRecord = {
   citation_map_json: unknown | null;
   next_step_proposal: string | null;
   token_usage_json: unknown | null;
+  provider_native_json: unknown | null;
   error_message: string | null;
   started_at: string | null;
   completed_at: string | null;
@@ -88,6 +89,7 @@ function normalizeStepStatusFromDb(status: string): StepStatus {
 }
 
 function legacyStepStatus(status: StepStatus): string {
+  if (status === 'planned') return 'pending';
   if (status === 'queued') return 'pending';
   if (status === 'done') return 'completed';
   return status;
@@ -286,18 +288,20 @@ export async function upsertResearchStep(params: {
   citationMap?: Array<Record<string, unknown>> | null;
   nextStepProposal?: string | null;
   tokenUsage?: Record<string, unknown> | null;
+  providerNative?: Record<string, unknown> | null;
   errorMessage?: string | null;
   started?: boolean;
   completed?: boolean;
 }): Promise<ResearchStepRecord> {
+  const statusValue = params.status === 'planned' ? 'queued' : params.status;
   const sql = `INSERT INTO research_steps (
        run_id, step_index, step_type, status, provider, model, mode, step_goal, inputs_summary, tools_used,
        raw_output, output_excerpt, sources_json, evidence_json, citation_map_json, next_step_proposal, token_usage_json,
-       error_message, started_at, completed_at, updated_at
+       provider_native_json, error_message, started_at, completed_at, updated_at
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
        $11,$12,$13,$14,$15,$16,$17,
-       $18, CASE WHEN $19::boolean THEN now() ELSE NULL END, CASE WHEN $20::boolean THEN now() ELSE NULL END, now()
+       $18,$19, CASE WHEN $20::boolean THEN now() ELSE NULL END, CASE WHEN $21::boolean THEN now() ELSE NULL END, now()
      )
      ON CONFLICT (run_id, step_index)
      DO UPDATE SET
@@ -316,10 +320,11 @@ export async function upsertResearchStep(params: {
        citation_map_json = COALESCE(EXCLUDED.citation_map_json, research_steps.citation_map_json),
        next_step_proposal = COALESCE(EXCLUDED.next_step_proposal, research_steps.next_step_proposal),
        token_usage_json = COALESCE(EXCLUDED.token_usage_json, research_steps.token_usage_json),
+       provider_native_json = COALESCE(EXCLUDED.provider_native_json, research_steps.provider_native_json),
        error_message = COALESCE(EXCLUDED.error_message, research_steps.error_message),
-       started_at = COALESCE(research_steps.started_at, CASE WHEN $19::boolean THEN now() ELSE NULL END),
+       started_at = COALESCE(research_steps.started_at, CASE WHEN $20::boolean THEN now() ELSE NULL END),
        completed_at = CASE
-         WHEN $20::boolean THEN now()
+         WHEN $21::boolean THEN now()
          ELSE research_steps.completed_at
        END,
        updated_at = now()
@@ -328,7 +333,7 @@ export async function upsertResearchStep(params: {
     params.runId,
     params.stepIndex,
     params.stepType,
-    params.status,
+    statusValue,
     params.provider,
     params.model ?? null,
     params.mode,
@@ -342,6 +347,7 @@ export async function upsertResearchStep(params: {
     jsonOrNull(params.citationMap),
     params.nextStepProposal ?? null,
     jsonOrNull(params.tokenUsage),
+    jsonOrNull(params.providerNative),
     params.errorMessage ?? null,
     params.started ?? false,
     params.completed ?? false
@@ -358,12 +364,37 @@ export async function upsertResearchStep(params: {
       throw error;
     }
     const legacyValues = [...values];
-    legacyValues[3] = legacyStepStatus(params.status);
+    legacyValues[3] = legacyStepStatus(statusValue as StepStatus);
     const rows = await query<ResearchStepRecord>(
       sql,
       legacyValues
     );
     return normalizeStepRecordStatus(rows[0]);
+  }
+}
+
+export async function initializePlannedResearchSteps(params: {
+  runId: string;
+  provider: ResearchProviderName;
+  mode: ResearchMode;
+  steps: Array<{
+    stepIndex: number;
+    stepType: StepType;
+    stepGoal?: string | null;
+    inputsSummary?: string | null;
+  }>;
+}) {
+  for (const step of params.steps) {
+    await upsertResearchStep({
+      runId: params.runId,
+      stepIndex: step.stepIndex,
+      stepType: step.stepType,
+      status: 'planned',
+      provider: params.provider,
+      mode: params.mode,
+      stepGoal: step.stepGoal ?? null,
+      inputsSummary: step.inputsSummary ?? null
+    });
   }
 }
 

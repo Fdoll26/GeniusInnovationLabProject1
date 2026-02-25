@@ -1,0 +1,104 @@
+{
+  "version": "1.0",
+  "refined_topic": "What are the 2026 EV battery trends?",
+  "assumptions": [
+    "Focus on global light-duty EV battery market.",
+    "Prioritize data published in the last 24 months."
+  ],
+  "total_budget": {
+    "max_steps": 8,
+    "max_sources": 40,
+    "max_tokens": 14400
+  },
+  "steps": [
+    {
+      "step_index": 0,
+      "step_type": "DEVELOP_RESEARCH_PLAN",
+      "title": "Scope and Plan",
+      "objective": "Finalize research scope, constraints, and measurable outputs.",
+      "target_source_types": ["government", "industry_report", "news"],
+      "search_query_pack": ["EV battery trends 2026 outlook", "EV battery market scope definition"],
+      "budgets": { "max_sources": 4, "max_tokens": 1200, "max_minutes": 8 },
+      "deliverables": ["Finalized research plan JSON"],
+      "done_definition": ["Scope is explicit", "Constraints and assumptions documented"]
+    },
+    {
+      "step_index": 1,
+      "step_type": "DISCOVER_SOURCES_WITH_PLAN",
+      "title": "Source Discovery",
+      "objective": "Collect and categorize candidate sources mapped to the plan.",
+      "target_source_types": ["government", "industry_report", "academic_journal", "news"],
+      "search_query_pack": ["IEA EV battery demand forecast 2026", "BloombergNEF battery chemistry market share 2026"],
+      "budgets": { "max_sources": 10, "max_tokens": 2200, "max_minutes": 15 },
+      "deliverables": ["Candidate source list with rationale"],
+      "done_definition": ["At least 8 candidates", "At least 1 primary source category covered"]
+    },
+    {
+      "step_index": 2,
+      "step_type": "SHORTLIST_RESULTS",
+      "title": "Shortlist",
+      "objective": "Select highest-quality and diverse sources for deep reading.",
+      "target_source_types": ["government", "industry_report", "academic_journal"],
+      "search_query_pack": ["LFP vs NMC EV batteries 2026 share", "battery pack cost trend 2026"],
+      "budgets": { "max_sources": 8, "max_tokens": 1200, "max_minutes": 8 },
+      "deliverables": ["Shortlisted source set"],
+      "done_definition": ["Shortlist balanced by source type", "Conflicting viewpoints included"]
+    },
+    {
+      "step_index": 3,
+      "step_type": "DEEP_READ",
+      "title": "Deep Read",
+      "objective": "Extract key findings, methods, and limitations from shortlisted sources.",
+      "target_source_types": ["government", "industry_report", "academic_journal"],
+      "search_query_pack": ["EV battery supply chain constraints 2026", "battery gigafactory capacity utilization 2026"],
+      "budgets": { "max_sources": 8, "max_tokens": 2600, "max_minutes": 20 },
+      "deliverables": ["Deep read notes with evidence snippets"],
+      "done_definition": ["Key quantitative findings captured", "Limitations noted per source"]
+    },
+    {
+      "step_index": 4,
+      "step_type": "EXTRACT_EVIDENCE",
+      "title": "Evidence Extraction",
+      "objective": "Convert deep-read notes into structured claims with confidence.",
+      "target_source_types": ["government", "industry_report", "academic_journal"],
+      "search_query_pack": ["EV battery price $/kWh 2026 projections", "solid-state battery commercialization timeline"],
+      "budgets": { "max_sources": 6, "max_tokens": 1500, "max_minutes": 10 },
+      "deliverables": ["Structured evidence table"],
+      "done_definition": ["Claims are traceable to sources", "Confidence set for each claim"]
+    },
+    {
+      "step_index": 5,
+      "step_type": "COUNTERPOINTS",
+      "title": "Counterpoints",
+      "objective": "Identify disagreements and downside scenarios across the evidence.",
+      "target_source_types": ["industry_report", "news", "expert_analysis"],
+      "search_query_pack": ["EV battery demand downside risks 2026", "battery raw material volatility forecast"],
+      "budgets": { "max_sources": 4, "max_tokens": 1500, "max_minutes": 10 },
+      "deliverables": ["Counterpoint matrix"],
+      "done_definition": ["At least 3 high-impact risks captured", "Opposing evidence documented"]
+    },
+    {
+      "step_index": 6,
+      "step_type": "GAP_CHECK",
+      "title": "Gap Check",
+      "objective": "Check whether major unanswered questions remain and propose follow-up queries.",
+      "target_source_types": ["government", "industry_report", "dataset"],
+      "search_query_pack": ["EV battery policy impact 2026", "battery recycling capacity forecast 2026"],
+      "budgets": { "max_sources": 3, "max_tokens": 1200, "max_minutes": 8 },
+      "deliverables": ["Gap assessment"],
+      "done_definition": ["Critical knowledge gaps explicitly listed"]
+    },
+    {
+      "step_index": 7,
+      "step_type": "SECTION_SYNTHESIS",
+      "title": "Synthesis",
+      "objective": "Produce final report sections with citations and uncertainty notes.",
+      "target_source_types": ["reference", "government", "industry_report"],
+      "search_query_pack": ["EV battery trends 2026 summary"],
+      "budgets": { "max_sources": 3, "max_tokens": 3000, "max_minutes": 20 },
+      "deliverables": ["Final provider report markdown"],
+      "done_definition": ["Sections complete", "Inline citations mapped"]
+    }
+  ],
+  "deliverables": ["Evidence-backed research report", "Source list and citation mapping"]
+}

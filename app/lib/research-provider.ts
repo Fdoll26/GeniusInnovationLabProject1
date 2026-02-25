@@ -1,6 +1,18 @@
-import { runGemini, runGeminiReasoningStep } from './gemini-client';
-import { getResponseOutputText, getResponseSources, runOpenAiReasoningStep, startResearchJob } from './openai-client';
+import { extractGeminiGroundingMetadata, runGemini, runGeminiReasoningStep } from './gemini-client';
+import {
+  getResponseOutputText,
+  getResponsePrimaryMessageContent,
+  getResponseSources,
+  runOpenAiReasoningStep,
+  startResearchJob
+} from './openai-client';
 import { getResearchProviderConfig } from './research-config';
+import {
+  buildFallbackResearchPlan,
+  parseResearchPlanFromText,
+  RESEARCH_PLAN_SCHEMA
+} from './research-plan-schema';
+import { STEP_SEQUENCE } from './research-types';
 import type {
   ResearchEvidence,
   ResearchPlan,
@@ -180,6 +192,10 @@ async function runFastReasoning(params: {
   maxOutputTokens: number;
   model: string;
   useSearch?: boolean;
+  structuredOutput?: {
+    schemaName: string;
+    jsonSchema: Record<string, unknown>;
+  };
 }) {
   if (params.provider === 'openai') {
     const out = await runOpenAiReasoningStep({
@@ -187,9 +203,16 @@ async function runFastReasoning(params: {
       timeoutMs: params.timeoutMs,
       maxOutputTokens: params.maxOutputTokens,
       model: params.model,
-      useWebSearch: params.useSearch ?? false
+      useWebSearch: params.useSearch ?? true,
+      structuredOutput: params.structuredOutput
     });
-    return { text: out.text, usage: out.usage ?? null, rawSources: null };
+    return {
+      text: out.text,
+      usage: out.usage ?? null,
+      rawSources: null,
+      providerNativeOutput: out.primaryContent?.text ?? out.text,
+      providerNativeCitationMetadata: out.primaryContent?.annotations ?? null
+    };
   }
 
   const out = await runGeminiReasoningStep({
@@ -197,9 +220,16 @@ async function runFastReasoning(params: {
     timeoutMs: params.timeoutMs,
     maxOutputTokens: params.maxOutputTokens,
     model: params.model,
-    useSearch: params.useSearch ?? false
+    useSearch: params.useSearch ?? true,
+    structuredOutput: params.structuredOutput
   });
-  return { text: out.text, usage: out.usage ?? null, rawSources: out.sources ?? null };
+  return {
+    text: out.text,
+    usage: out.usage ?? null,
+    rawSources: out.sources ?? null,
+    providerNativeOutput: out.text,
+    providerNativeCitationMetadata: out.groundingMetadata ?? null
+  };
 }
 
 async function runDeep(params: {
@@ -218,7 +248,9 @@ async function runDeep(params: {
     return {
       text: getResponseOutputText(out.data),
       usage: null,
-      rawSources: getResponseSources(out.data) ?? null
+      rawSources: getResponseSources(out.data) ?? null,
+      providerNativeOutput: getResponsePrimaryMessageContent(out.data)?.text ?? getResponseOutputText(out.data),
+      providerNativeCitationMetadata: getResponsePrimaryMessageContent(out.data)?.annotations ?? null
     };
   }
 
@@ -230,42 +262,9 @@ async function runDeep(params: {
   return {
     text: out.outputText,
     usage: null,
-    rawSources: out.sources ?? null
-  };
-}
-
-function fallbackPlan(question: string): ResearchPlan {
-  return {
-    objectives: ['Answer the user question with evidence-backed findings and explicit uncertainty.'],
-    outline: ['Context', 'Current Evidence', 'Counterpoints', 'Gaps', 'Implications'],
-    sections: [
-      {
-        section: 'Context',
-        objectives: ['Define scope and key terms'],
-        query_pack: [question, `${question} definitions`],
-        acceptance_criteria: ['Clear scope and definitions']
-      },
-      {
-        section: 'Evidence',
-        objectives: ['Collect primary and secondary sources'],
-        query_pack: [`${question} data`, `${question} primary sources`],
-        acceptance_criteria: ['At least one primary source', 'Cross-source corroboration']
-      },
-      {
-        section: 'Counterpoints',
-        objectives: ['Capture strongest disagreements and limits'],
-        query_pack: [`${question} criticism`, `${question} limitations`],
-        acceptance_criteria: ['At least two meaningful counterarguments']
-      }
-    ],
-    source_quality_requirements: {
-      primary_sources_required: true,
-      recency: 'Prioritize last 24 months unless foundational history is required.',
-      geography: 'Global unless the question specifies geography.',
-      secondary_sources_allowed: true
-    },
-    token_budgets: {},
-    output_budgets: {}
+    rawSources: out.sources ?? null,
+    providerNativeOutput: out.outputText,
+    providerNativeCitationMetadata: extractGeminiGroundingMetadata(out.sources) ?? null
   };
 }
 
@@ -286,10 +285,8 @@ function buildStepPrompt(input: ExecutionInput): { prompt: string; expectsJson: 
     return {
       expectsJson: true,
       prompt:
-        `${base}\n\nReturn ONLY JSON with schema:\n` +
-        `{"objectives":string[],"outline":string[],"sections":[{"section":string,"objectives":string[],"query_pack":string[],"acceptance_criteria":string[]}],` +
-        `"source_quality_requirements":{"primary_sources_required":boolean,"recency":string,"geography":string,"secondary_sources_allowed":boolean},` +
-        `"token_budgets":object,"output_budgets":object}`
+        `${base}\n\nReturn ONLY JSON matching this exact schema and plan all steps in execution order:\n` +
+        JSON.stringify(RESEARCH_PLAN_SCHEMA)
     };
   }
 
@@ -376,7 +373,14 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
           timeoutMs: input.timeoutMs,
           maxOutputTokens: outputTokens,
           model,
-          useSearch: input.stepType === 'DISCOVER_SOURCES_WITH_PLAN'
+          useSearch: true,
+          structuredOutput:
+            input.stepType === 'DEVELOP_RESEARCH_PLAN'
+              ? {
+                  schemaName: 'research_plan',
+                  jsonSchema: RESEARCH_PLAN_SCHEMA
+                }
+              : undefined
         });
 
   const rawText = runResult.text.trim();
@@ -390,8 +394,21 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
     if (parsedObj) {
       structuredOutput = parsedObj;
       if (input.stepType === 'DEVELOP_RESEARCH_PLAN') {
-        const parsedPlan = parseJsonObject<ResearchPlan>(rawText);
-        updatedPlan = parsedPlan ?? fallbackPlan(input.question);
+        const parsedPlan = parseResearchPlanFromText(rawText, {
+          refinedTopic: input.question,
+          sourceTarget: input.sourceTarget,
+          maxTokensPerStep: input.maxOutputTokens,
+          maxSteps: STEP_SEQUENCE.length,
+          maxTotalSources: input.sourceTarget * 8
+        });
+        updatedPlan =
+          parsedPlan ??
+          buildFallbackResearchPlan({
+            refinedTopic: input.question,
+            sourceTarget: input.sourceTarget,
+            maxTokensPerStep: input.maxOutputTokens,
+            maxTotalSources: input.sourceTarget * 8
+          });
         structuredOutput = updatedPlan as unknown as Record<string, unknown>;
         evidence = [];
       } else if (input.stepType === 'EXTRACT_EVIDENCE') {
@@ -445,6 +462,8 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
     inputs_summary: compactSummary(`${input.stepType} | sourceTarget=${input.sourceTarget} | maxTokens=${outputTokens}`),
     raw_output_text: rawText,
     citations,
+    provider_native_output: runResult.providerNativeOutput ?? rawText,
+    provider_native_citation_metadata: runResult.providerNativeCitationMetadata ?? null,
     evidence,
     tools_used: [input.provider === 'openai' ? 'web_search_preview' : 'google_search'],
     token_usage: runResult.usage as Record<string, unknown> | null,
@@ -464,6 +483,7 @@ export async function generateResearchPlan(params: {
   maxTokensPerStep: number;
   timeoutMs: number;
 }): Promise<{ needsClarification: boolean; clarifyingQuestions: string[]; assumptions: string[]; plan: ResearchPlan; brief: unknown }> {
+  const providerCfg = getResearchProviderConfig(params.provider);
   const out = await executePipelineStep({
     provider: params.provider,
     stepType: 'DEVELOP_RESEARCH_PLAN',
@@ -473,22 +493,29 @@ export async function generateResearchPlan(params: {
     priorStepSummary: '',
     sourceTarget: params.targetSourcesPerStep,
     maxOutputTokens: params.maxTokensPerStep,
-    maxCandidates: getResearchProviderConfig(params.provider).max_candidates,
-    shortlistSize: getResearchProviderConfig(params.provider).shortlist_size
+    maxCandidates: providerCfg.max_candidates,
+    shortlistSize: providerCfg.shortlist_size
   });
 
-  const plan = out.updatedPlan ?? fallbackPlan(params.question);
+  const plan =
+    out.updatedPlan ??
+    buildFallbackResearchPlan({
+      refinedTopic: params.question,
+      sourceTarget: params.targetSourcesPerStep,
+      maxTokensPerStep: params.maxTokensPerStep,
+      maxTotalSources: params.targetSourcesPerStep * params.maxSteps
+    });
   return {
     needsClarification: false,
     clarifyingQuestions: [],
-    assumptions: [],
+    assumptions: plan.assumptions,
     plan,
     brief: {
       audience: 'General',
       scope: 'Evidence-backed synthesis',
       depth: params.depth,
       geography_time_window: 'Global and recent with foundational exceptions',
-      required_sections: plan.outline
+      required_sections: plan.steps.map((step) => step.title)
     }
   };
 }

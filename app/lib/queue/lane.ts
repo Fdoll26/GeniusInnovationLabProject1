@@ -40,7 +40,7 @@ export function createLaneQueue(params: {
           entry.reject(error);
         } finally {
           activeWorkers -= 1;
-          pendingByJobId.delete(entry.job.jobId);
+          pendingByJobId.delete(entry.job.idempotencyKey || entry.job.jobId);
           drain();
         }
       })();
@@ -57,7 +57,8 @@ export function createLaneQueue(params: {
         throw new Error(`Lane ${name} rejected provider ${job.provider}; expected ${provider}`);
       }
 
-      const existing = pendingByJobId.get(job.jobId);
+      const key = job.idempotencyKey || job.jobId;
+      const existing = pendingByJobId.get(key);
       if (existing) {
         return existing;
       }
@@ -66,7 +67,7 @@ export function createLaneQueue(params: {
         queue.push({ job, task, resolve, reject });
         drain();
       });
-      pendingByJobId.set(job.jobId, promise);
+      pendingByJobId.set(key, promise);
       return promise;
     },
     resetForTests() {

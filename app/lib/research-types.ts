@@ -35,7 +35,7 @@ export const STEP_LABELS: Record<(typeof STEP_SEQUENCE)[number], string> = {
   SECTION_SYNTHESIS: 'Section Synthesis'
 };
 
-export type StepStatus = 'queued' | 'running' | 'done' | 'failed';
+export type StepStatus = 'planned' | 'queued' | 'running' | 'done' | 'failed';
 
 export type TokenUsage = {
   prompt?: number | null;
@@ -78,6 +78,8 @@ export type ResearchStepArtifact = {
   inputs_summary: string;
   raw_output_text: string;
   citations: ResearchCitation[];
+  provider_native_output?: string | null;
+  provider_native_citation_metadata?: unknown;
   evidence: ResearchEvidence[];
   tools_used?: string[];
   token_usage?: TokenUsage | null;
@@ -93,18 +95,45 @@ export type ResearchPlanSection = {
   acceptance_criteria: string[];
 };
 
+export type ResearchPlanSourceType =
+  | 'academic_journal'
+  | 'government'
+  | 'industry_report'
+  | 'news'
+  | 'company_filing'
+  | 'dataset'
+  | 'reference'
+  | 'expert_analysis';
+
+export type ResearchPlanStepBudget = {
+  max_sources: number;
+  max_tokens: number;
+  max_minutes: number;
+};
+
+export type ResearchPlanStep = {
+  step_index: number;
+  step_type: (typeof STEP_SEQUENCE)[number];
+  title: string;
+  objective: string;
+  target_source_types: ResearchPlanSourceType[];
+  search_query_pack: string[];
+  budgets: ResearchPlanStepBudget;
+  deliverables: string[];
+  done_definition: string[];
+};
+
 export type ResearchPlan = {
-  objectives: string[];
-  outline: string[];
-  sections: ResearchPlanSection[];
-  source_quality_requirements: {
-    primary_sources_required: boolean;
-    recency: string;
-    geography: string;
-    secondary_sources_allowed: boolean;
+  version: '1.0';
+  refined_topic: string;
+  assumptions: string[];
+  total_budget: {
+    max_steps: number;
+    max_sources: number;
+    max_tokens: number;
   };
-  token_budgets: Partial<Record<(typeof STEP_SEQUENCE)[number], number>>;
-  output_budgets: Partial<Record<(typeof STEP_SEQUENCE)[number], number>>;
+  steps: ResearchPlanStep[];
+  deliverables: string[];
 };
 
 export type PipelineProgress = {

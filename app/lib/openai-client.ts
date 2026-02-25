@@ -553,6 +553,20 @@ export function getResponseOutputText(data: unknown): string {
   return extractOutputText(data);
 }
 
+export function getResponsePrimaryMessageContent(data: unknown): { text: string; annotations: unknown } | null {
+  const typed = data as {
+    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+  };
+  const firstContent = typed?.output?.[0]?.content?.[0];
+  if (!firstContent || typeof firstContent.text !== 'string') {
+    return null;
+  }
+  return {
+    text: firstContent.text,
+    annotations: firstContent.annotations ?? null
+  };
+}
+
 export function getResponseSources(data: unknown): unknown {
   return (data as { sources?: unknown }).sources;
 }
@@ -1034,13 +1048,32 @@ export async function runOpenAiReasoningStep(params: {
   previousResponseId?: string | null;
   timeoutMs?: number;
   useWebSearch?: boolean;
-}): Promise<{ text: string; responseId: string | null; usage?: unknown }> {
+  structuredOutput?: {
+    schemaName: string;
+    jsonSchema: Record<string, unknown>;
+  };
+}): Promise<{
+  text: string;
+  responseId: string | null;
+  usage?: unknown;
+  primaryContent?: { text: string; annotations: unknown };
+}> {
   const body: Record<string, unknown> = {
     model: params.model || refinerModel,
     input: params.prompt,
     max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
     ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})
   };
+  if (params.structuredOutput) {
+    body.text = {
+      format: {
+        type: 'json_schema',
+        name: params.structuredOutput.schemaName,
+        schema: params.structuredOutput.jsonSchema,
+        strict: true
+      }
+    };
+  }
   if (params.useWebSearch ?? true) {
     body.tools = [{ type: 'web_search_preview' }];
     body.tool_choice = 'auto';
@@ -1054,9 +1087,11 @@ export async function runOpenAiReasoningStep(params: {
       : undefined
   );
   const typed = data as { id?: string; usage?: unknown };
+  const primary = getResponsePrimaryMessageContent(data);
   return {
-    text: extractOutputText(data).trim(),
+    text: (primary?.text ?? extractOutputText(data)).trim(),
     responseId: typeof typed.id === 'string' ? typed.id : null,
-    usage: typed.usage
+    usage: typed.usage,
+    ...(primary ? { primaryContent: primary } : {})
   };
 }

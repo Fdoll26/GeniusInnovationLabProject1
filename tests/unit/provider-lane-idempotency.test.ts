@@ -19,7 +19,7 @@ describe('provider lane job idempotency', () => {
       provider: 'openai',
       modelRunId: 'run-1',
       attempt: 1,
-      jobId: 'openai:run-1:1'
+      idempotencyKey: 'openai:run-1:1'
     });
 
     let executions = 0;

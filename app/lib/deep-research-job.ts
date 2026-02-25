@@ -6,6 +6,7 @@ export type DeepResearchJobPayload = {
   provider: ResearchProviderName;
   attempt: number;
   jobId: string;
+  idempotencyKey: string;
 };
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -31,7 +32,12 @@ export function parseDeepResearchJobPayload(raw: unknown): DeepResearchJobPayloa
   if (providerRaw !== 'openai' && providerRaw !== 'gemini') {
     throw new Error('Deep research job payload "provider" must be "openai" or "gemini"');
   }
-  const jobId = requireNonEmptyString(record, 'jobId');
+  const jobIdRaw = typeof record.jobId === 'string' ? record.jobId.trim() : '';
+  const idempotencyRaw = typeof record.idempotencyKey === 'string' ? record.idempotencyKey.trim() : '';
+  const idempotencyKey = idempotencyRaw || jobIdRaw;
+  if (!idempotencyKey) {
+    throw new Error('Deep research job payload requires non-empty "jobId" or "idempotencyKey"');
+  }
   const attemptValue = record.attempt;
   if (!Number.isInteger(attemptValue) || Number(attemptValue) < 1) {
     throw new Error('Deep research job payload "attempt" must be a positive integer');
@@ -42,6 +48,7 @@ export function parseDeepResearchJobPayload(raw: unknown): DeepResearchJobPayloa
     modelRunId,
     provider: providerRaw,
     attempt: Number(attemptValue),
-    jobId
+    jobId: jobIdRaw || idempotencyKey,
+    idempotencyKey
   };
 }

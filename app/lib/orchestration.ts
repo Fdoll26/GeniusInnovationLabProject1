@@ -390,7 +390,8 @@ function buildDeepResearchJob(params: {
     modelRunId: params.modelRunId,
     provider: params.provider,
     attempt: params.attempt,
-    jobId: `${params.provider}:${params.modelRunId}:${params.attempt}`
+    jobId: `${params.provider}:${params.modelRunId}:${params.attempt}`,
+    idempotencyKey: `${params.provider}:${params.modelRunId}:${params.attempt}`
   });
 }
 

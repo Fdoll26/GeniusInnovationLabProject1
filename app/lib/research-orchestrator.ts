@@ -5,6 +5,7 @@ import {
   getLatestResearchRunBySessionId,
   getLatestResearchRunBySessionProvider,
   getResearchRunById,
+  initializePlannedResearchSteps,
   listCitationMappings,
   listResearchEvidence,
   listResearchRunsBySessionId,
@@ -15,7 +16,7 @@ import {
   upsertResearchSource,
   upsertResearchStep
 } from './research-run-repo';
-import { executePipelineStep } from './research-provider';
+import { executePipelineStep, generateResearchPlan } from './research-provider';
 import { getResearchProviderConfig } from './research-config';
 import { STEP_LABELS, STEP_SEQUENCE, type ResearchPlan, type ResearchProviderName } from './research-types';
 import { getSessionById } from './session-repo';
@@ -110,6 +111,100 @@ async function persistStepArtifacts(params: {
   }
 }
 
+async function executePlannedStep(params: {
+  runId: string;
+  run: NonNullable<Awaited<ReturnType<typeof getResearchRunById>>>;
+  settings: Awaited<ReturnType<typeof getUserSettings>>;
+  providerCfg: ReturnType<typeof getResearchProviderConfig>;
+  stepId: (typeof STEP_SEQUENCE)[number];
+  currentIndex: number;
+  totalSteps: number;
+}) {
+  const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps } = params;
+
+  await upsertResearchStep({
+    runId,
+    stepIndex: currentIndex,
+    stepType: stepId,
+    status: 'running',
+    provider: run.provider,
+    mode: run.mode,
+    stepGoal: `Execute ${stepId.toLowerCase().replace(/_/g, ' ')}`,
+    inputsSummary: `step ${currentIndex + 1}/${totalSteps}`,
+    started: true
+  });
+  await updateResearchRun({
+    runId,
+    state: 'IN_PROGRESS',
+    progress: {
+      step_id: stepId,
+      step_index: currentIndex,
+      total_steps: totalSteps,
+      step_label: STEP_LABELS[stepId]
+    }
+  });
+
+  const lock = await withProviderDeepResearchLock(run.provider, async () => {
+    const stepsNow = await listResearchSteps(runId);
+    const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
+    return executePipelineStep({
+      provider: run.provider,
+      stepType: stepId,
+      question: run.question,
+      timeoutMs: (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
+      plan,
+      priorStepSummary: summarizePriorSteps(stepsNow),
+      sourceTarget: clamp(run.target_sources_per_step, 1, 30),
+      maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
+      maxCandidates: providerCfg.max_candidates,
+      shortlistSize: providerCfg.shortlist_size
+    });
+  });
+
+  if (!lock.acquired) {
+    await upsertResearchStep({
+      runId,
+      stepIndex: currentIndex,
+      stepType: stepId,
+      status: 'queued',
+      provider: run.provider,
+      mode: run.mode,
+      stepGoal: `Waiting lock: ${stepId}`,
+      inputsSummary: 'Provider lock busy; will retry.'
+    });
+    return { status: 'retry' as const };
+  }
+
+  const artifact = lock.value;
+  const completedStep = await upsertResearchStep({
+    runId,
+    stepIndex: currentIndex,
+    stepType: stepId,
+    status: 'done',
+    provider: run.provider,
+    mode: run.mode,
+    model: artifact.model_used,
+    stepGoal: artifact.step_goal,
+    inputsSummary: artifact.inputs_summary,
+    toolsUsed: artifact.tools_used,
+    rawOutput: artifact.raw_output_text,
+    outputExcerpt: artifact.raw_output_text.slice(0, 700),
+    sources: artifact.citations as unknown as Array<Record<string, unknown>>,
+    evidence: artifact.evidence as unknown as Array<Record<string, unknown>>,
+    citationMap: [],
+    nextStepProposal: artifact.next_step_hint,
+    tokenUsage: artifact.token_usage as Record<string, unknown> | null,
+    providerNative: {
+      output_text: artifact.provider_native_output ?? artifact.raw_output_text,
+      citation_metadata: artifact.provider_native_citation_metadata ?? null
+    },
+    completed: true
+  });
+
+  await persistStepArtifacts({ runId, stepId: completedStep.id, artifact });
+  return { status: 'done' as const, artifact };
+}
+
 export async function startRun(params: {
   sessionId: string;
   userId: string;
@@ -132,9 +227,23 @@ export async function startRun(params: {
     minWordCount: defaultWordTarget(settings.research_depth)
   });
 
+  const generatedPlan = await generateResearchPlan({
+    provider: params.provider,
+    question: params.question,
+    depth: settings.research_depth,
+    maxSteps: STEP_SEQUENCE.length,
+    targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, 25),
+    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
+    timeoutMs: (params.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000
+  });
+
   await updateResearchRun({
     runId: run.id,
     state: 'PLANNED',
+    plan: generatedPlan.plan,
+    clarifyingQuestions: generatedPlan.clarifyingQuestions,
+    assumptions: generatedPlan.assumptions,
+    brief: generatedPlan.brief as Record<string, unknown>,
     progress: {
       step_id: null,
       step_index: 0,
@@ -144,7 +253,23 @@ export async function startRun(params: {
     }
   });
 
-  return { runId: run.id, needsClarification: false, clarifyingQuestions: [] };
+  await initializePlannedResearchSteps({
+    runId: run.id,
+    provider: run.provider,
+    mode: run.mode,
+    steps: generatedPlan.plan.steps.map((step, idx) => ({
+      stepIndex: step.step_index ?? idx,
+      stepType: step.step_type,
+      stepGoal: step.objective,
+      inputsSummary: `planned queries=${step.search_query_pack.length} source_types=${step.target_source_types.length}`
+    }))
+  });
+
+  return {
+    runId: run.id,
+    needsClarification: generatedPlan.needsClarification,
+    clarifyingQuestions: generatedPlan.clarifyingQuestions
+  };
 }
 
 export async function submitClarifications(_params: {
@@ -226,74 +351,20 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
   }
 
   const stepId = STEP_SEQUENCE[currentIndex];
-  const stepRecord = await upsertResearchStep({
-    runId,
-    stepIndex: currentIndex,
-    stepType: stepId,
-    status: 'running',
-    provider: run.provider,
-    mode: run.mode,
-    stepGoal: `Execute ${stepId.toLowerCase().replace(/_/g, ' ')}`,
-    inputsSummary: `step ${currentIndex + 1}/${totalSteps}`,
-    started: true
-  });
-
   try {
-    const lock = await withProviderDeepResearchLock(run.provider, async () => {
-      const stepsNow = await listResearchSteps(runId);
-      const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
-      return executePipelineStep({
-        provider: run.provider,
-        stepType: stepId,
-        question: run.question,
-        timeoutMs:
-          (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
-        plan,
-        priorStepSummary: summarizePriorSteps(stepsNow),
-        sourceTarget: clamp(run.target_sources_per_step, 1, 30),
-        maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
-        maxCandidates: providerCfg.max_candidates,
-        shortlistSize: providerCfg.shortlist_size
-      });
+    const execution = await executePlannedStep({
+      runId,
+      run,
+      settings,
+      providerCfg,
+      stepId,
+      currentIndex,
+      totalSteps
     });
-
-    if (!lock.acquired) {
-      await upsertResearchStep({
-        runId,
-        stepIndex: currentIndex,
-        stepType: stepId,
-        status: 'queued',
-        provider: run.provider,
-        mode: run.mode,
-        stepGoal: `Waiting lock: ${stepId}`,
-        inputsSummary: 'Provider lock busy; will retry.'
-      });
+    if (execution.status === 'retry') {
       return { state: 'IN_PROGRESS', done: false };
     }
-
-    const artifact = lock.value;
-    const completedStep = await upsertResearchStep({
-      runId,
-      stepIndex: currentIndex,
-      stepType: stepId,
-      status: 'done',
-      provider: run.provider,
-      mode: run.mode,
-      model: artifact.model_used,
-      stepGoal: artifact.step_goal,
-      inputsSummary: artifact.inputs_summary,
-      toolsUsed: artifact.tools_used,
-      rawOutput: artifact.raw_output_text,
-      outputExcerpt: artifact.raw_output_text.slice(0, 700),
-      sources: artifact.citations as unknown as Array<Record<string, unknown>>,
-      evidence: artifact.evidence as unknown as Array<Record<string, unknown>>,
-      citationMap: [],
-      nextStepProposal: artifact.next_step_hint,
-      tokenUsage: artifact.token_usage as Record<string, unknown> | null,
-      completed: true
-    });
-
-    await persistStepArtifacts({ runId, stepId: completedStep.id, artifact });
+    const artifact = execution.artifact;
 
     if (stepId === 'DEVELOP_RESEARCH_PLAN') {
       const nextPlan = artifact.updatedPlan ?? parseJson<ResearchPlan | null>(run.research_plan_json, null);

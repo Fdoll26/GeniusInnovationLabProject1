@@ -1,31 +1,25 @@
 // @vitest-environment node
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
+const openAiPlanFixture = readFileSync(path.resolve(process.cwd(), 'tests/fixtures/llm/research-plan-openai.json'), 'utf8');
+const geminiPlanFixture = readFileSync(path.resolve(process.cwd(), 'tests/fixtures/llm/research-plan-gemini.json'), 'utf8');
+
+const runOpenAiReasoningStep = vi.fn(async () => ({
+  text: openAiPlanFixture,
+  responseId: 'r1',
+  usage: null
+}));
+
+const runGeminiReasoningStep = vi.fn(async () => ({
+  text: geminiPlanFixture,
+  sources: null,
+  usage: null
+}));
+
 vi.mock('../../app/lib/openai-client', () => ({
-  runOpenAiReasoningStep: vi.fn(async () => ({
-    text: JSON.stringify({
-      objectives: ['discover'],
-      outline: ['summary'],
-      sections: [
-        {
-          section: 'summary',
-          objectives: ['discover'],
-          query_pack: ['q1'],
-          acceptance_criteria: ['c1']
-        }
-      ],
-      source_quality_requirements: {
-        primary_sources_required: true,
-        recency: 'recent',
-        geography: 'global',
-        secondary_sources_allowed: true
-      },
-      token_budgets: {},
-      output_budgets: {}
-    }),
-    responseId: 'r1',
-    usage: null
-  })),
+  runOpenAiReasoningStep: (...args: any[]) => runOpenAiReasoningStep(...args),
   startResearchJob: vi.fn(async () => ({
     responseId: null,
     status: 'completed',
@@ -35,27 +29,25 @@ vi.mock('../../app/lib/openai-client', () => ({
     }
   })),
   pollDeepResearch: vi.fn(async () => ({ status: 'completed', data: { output_text: 'native text https://example.com' } })),
+  getResponsePrimaryMessageContent: vi.fn(() => null),
   getResponseOutputText: vi.fn(() => 'native text https://example.com'),
   getResponseSources: vi.fn(() => null)
 }));
 
 vi.mock('../../app/lib/gemini-client', () => ({
-  runGeminiReasoningStep: vi.fn(async () => ({
-    text: 'This is a long evidence-bearing line with details and context for extraction https://example.org',
-    sources: null,
-    usage: null
-  })),
+  runGeminiReasoningStep: (...args: any[]) => runGeminiReasoningStep(...args),
   runGemini: vi.fn(async () => ({
     outputText:
       'This collected finding line is intentionally long and detailed to exceed the evidence extraction threshold while citing https://example.org',
     sources: null
-  }))
+  })),
+  extractGeminiGroundingMetadata: vi.fn(() => null)
 }));
 
 import { executeCustomStep, generateResearchPlan } from '../../app/lib/research-provider';
 
 describe('research-provider', () => {
-  it('generates a structured plan', async () => {
+  it('generates a structured plan for openai from fixture output', async () => {
     const out = await generateResearchPlan({
       provider: 'openai',
       question: 'What are 2026 EV battery trends?',
@@ -67,8 +59,38 @@ describe('research-provider', () => {
     });
 
     expect(out.needsClarification).toBe(false);
-    expect(out.plan.sections.length).toBeGreaterThan(0);
-    expect(out.plan.sections[0]?.query_pack[0]).toBe('q1');
+    expect(out.plan.steps.length).toBeGreaterThan(0);
+    expect(out.plan.steps[0]?.step_type).toBe('DEVELOP_RESEARCH_PLAN');
+    expect(out.plan.steps[1]?.search_query_pack[0]).toContain('IEA');
+    expect(runOpenAiReasoningStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        structuredOutput: expect.objectContaining({
+          schemaName: 'research_plan'
+        })
+      })
+    );
+  });
+
+  it('generates a structured plan for gemini from fixture output', async () => {
+    const out = await generateResearchPlan({
+      provider: 'gemini',
+      question: 'What are 2026 EV battery trends?',
+      depth: 'standard',
+      maxSteps: 8,
+      targetSourcesPerStep: 5,
+      maxTokensPerStep: 1800,
+      timeoutMs: 30_000
+    });
+
+    expect(out.plan.steps.length).toBe(3);
+    expect(out.plan.steps[0]?.step_type).toBe('DEVELOP_RESEARCH_PLAN');
+    expect(runGeminiReasoningStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        structuredOutput: expect.objectContaining({
+          jsonSchema: expect.any(Object)
+        })
+      })
+    );
   });
 
   it('extracts sources/evidence for a custom step', async () => {
