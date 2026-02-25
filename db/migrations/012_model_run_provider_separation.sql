@@ -3,6 +3,18 @@ BEGIN;
 ALTER TABLE research_runs
   ADD COLUMN IF NOT EXISTS attempt int NOT NULL DEFAULT 1;
 
+WITH ranked AS (
+  SELECT
+    id,
+    ROW_NUMBER() OVER (PARTITION BY session_id, provider ORDER BY created_at ASC, id ASC) AS next_attempt
+  FROM research_runs
+)
+UPDATE research_runs r
+SET attempt = ranked.next_attempt
+FROM ranked
+WHERE r.id = ranked.id
+  AND r.attempt IS DISTINCT FROM ranked.next_attempt;
+
 DO $$
 BEGIN
   IF NOT EXISTS (

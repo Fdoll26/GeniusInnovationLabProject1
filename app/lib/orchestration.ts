@@ -2,7 +2,7 @@ import { getResponseOutputText, getResponseSources, pollDeepResearch, startResea
 import { runGemini, rewritePromptGemini, startRefinementGemini, summarizeForReportGemini } from './gemini-client';
 import { createQuestions, getNextQuestion, listQuestions } from './refinement-repo';
 import { updateSessionState, getSessionById } from './session-repo';
-import { getNextQueuedProviderResult, getRunningProviderResult, listProviderResults, upsertProviderResult } from './provider-repo';
+import { listProviderResults, upsertProviderResult } from './provider-repo';
 import { buildPdfReport } from './pdf-report';
 import { claimReportSendForSession, createReport, getReportBySession, updateReportContent, updateReportEmail, checkReportTiming } from './report-repo';
 import { sendReportEmail } from './email-sender';
@@ -12,70 +12,10 @@ import { pool } from './db';
 import { getResearchSnapshotByRunId, getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
 import { parseDeepResearchJobPayload, type DeepResearchJobPayload } from './deep-research-job';
 import { updateResearchRun } from './research-run-repo';
+import { enqueueOpenAiLaneJob } from './queue/openai';
+import { enqueueGeminiLaneJob } from './queue/gemini';
 
-const providerQueueKeys = {
-  openai: 'deep_research_queue_openai_v1',
-  gemini: 'deep_research_queue_gemini_v1'
-} as const;
-const inMemoryQueueLocks: Record<'openai' | 'gemini', { active: number }> = {
-  openai: { active: 0 },
-  gemini: { active: 0 }
-};
 const inMemorySessionLocks = new Set<string>();
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-async function tryAcquireInMemoryQueueLock(provider: 'openai' | 'gemini'): Promise<(() => void) | null> {
-  const state = inMemoryQueueLocks[provider];
-  if (state.active >= 1) {
-    return null;
-  }
-  state.active = 1;
-  return () => {
-    state.active = 0;
-  };
-}
-
-async function tryAcquirePgQueueLock(lockKey: string) {
-  if (!pool) {
-    return null;
-  }
-  // IMPORTANT: advisory locks are held per-connection. We must keep the client checked out
-  // for the duration of the queued work; otherwise the pool may close idle clients and
-  // release the lock early.
-  const client = await pool.connect();
-  try {
-    const result = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey]);
-    if (!result.rows[0]?.ok) {
-      client.release();
-      return null;
-    }
-    return client as any;
-  } catch {
-    try {
-      client.release();
-    } catch {
-      // ignore
-    }
-    return null;
-  }
-}
-
-async function releasePgQueueLock(lockKey: string, client: { query: (text: string, params?: any[]) => Promise<any>; release: () => void }) {
-  try {
-    await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey]);
-  } catch {
-    // best-effort
-  } finally {
-    try {
-      client.release();
-    } catch {
-      // ignore
-    }
-  }
-}
 
 async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T | null> {
   const lockKey = `session_run:${sessionId}`;
@@ -404,31 +344,6 @@ function replaceLinksWithRefs(text: string, refMap: Map<string, number>) {
   });
 }
 
-async function withProviderQueueLock<T>(
-  provider: 'openai' | 'gemini',
-  fn: () => Promise<T>
-): Promise<T | null> {
-  const lockKey = providerQueueKeys[provider];
-  const pgClient = await tryAcquirePgQueueLock(lockKey);
-  if (pgClient) {
-    try {
-      return await fn();
-    } finally {
-      await releasePgQueueLock(lockKey, pgClient as any);
-    }
-  }
-
-  const release = await tryAcquireInMemoryQueueLock(provider);
-  if (!release) {
-    return null;
-  }
-  try {
-    return await fn();
-  } finally {
-    release();
-  }
-}
-
 type DeepResearchTransitionContext = {
   topicId: string;
   modelRunId: string;
@@ -737,70 +652,6 @@ async function advanceProviderFromQueue(params: {
   });
 }
 
-async function processProviderQueue(
-  provider: 'openai' | 'gemini',
-  opts?: {
-    stub?: boolean;
-    stubOpenAI?: boolean;
-    stubGemini?: boolean;
-    skipOpenAI?: boolean;
-    skipGemini?: boolean;
-  }
-) {
-  const sessionsToSync = new Set<string>();
-  const didWork = await withProviderQueueLock(provider, async () => {
-    const running = await getRunningProviderResult(provider);
-    const target = running ?? (await getNextQueuedProviderResult(provider));
-    if (!target) return false;
-
-    const session = await getSessionById(target.session_id);
-    if (!session?.refined_prompt) {
-      await upsertProviderResult({
-        sessionId: target.session_id,
-        modelRunId: target.model_run_id ?? null,
-        provider,
-        status: 'failed',
-        errorMessage: 'Refined prompt missing',
-        completedAt: new Date().toISOString()
-      });
-      sessionsToSync.add(target.session_id);
-      return true;
-    }
-
-    const result = await advanceProviderFromQueue({
-      provider,
-      sessionId: target.session_id,
-      modelRunId: target.model_run_id ?? null,
-      refinedPrompt: session.refined_prompt,
-      userId: session.user_id,
-      opts
-    });
-
-    if (result.terminal) {
-      sessionsToSync.add(target.session_id);
-    }
-    return true;
-  });
-
-  if (!didWork) {
-    return;
-  }
-
-  await Promise.all([...sessionsToSync].map((sessionId) => syncSession(sessionId, opts)));
-}
-
-async function kickProviderQueues(opts?: {
-  stub?: boolean;
-  stubOpenAI?: boolean;
-  stubGemini?: boolean;
-  stubEmail?: boolean;
-  stubPdf?: boolean;
-  skipOpenAI?: boolean;
-  skipGemini?: boolean;
-}) {
-  await Promise.all([processProviderQueue('openai', opts), processProviderQueue('gemini', opts)]);
-}
-
 async function runProvidersLegacy(
   sessionId: string,
   opts?: {
@@ -847,6 +698,8 @@ async function runProvidersLegacy(
   };
 
   const existingOpenAi = existingByProvider.get('openai');
+  const laneJobs: Array<Promise<{ terminal: boolean }>> = [];
+
   if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && !opts?.skipOpenAI) {
     const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
@@ -857,7 +710,52 @@ async function runProvidersLegacy(
       queuedAt: nowIso,
       lastPolledAt: nowIso
     });
+    if (session?.refined_prompt) {
+      const job = buildDeepResearchJob({
+        topicId: sessionId,
+        modelRunId: modelRunId ?? `legacy:openai:${sessionId}`,
+        provider: 'openai',
+        attempt: 1
+      });
+      laneJobs.push(
+        enqueueOpenAiLaneJob({
+          job,
+          task: () =>
+            advanceProviderFromQueue({
+              provider: 'openai',
+              sessionId,
+              modelRunId,
+              refinedPrompt: session.refined_prompt as string,
+              userId: session.user_id,
+              opts
+            })
+        })
+      );
+    }
+  } else if (existingOpenAi?.status === 'running' && !opts?.skipOpenAI && session?.refined_prompt) {
+    const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
+    const job = buildDeepResearchJob({
+      topicId: sessionId,
+      modelRunId: modelRunId ?? `legacy:openai:${sessionId}`,
+      provider: 'openai',
+      attempt: 1
+    });
+    laneJobs.push(
+      enqueueOpenAiLaneJob({
+        job,
+        task: () =>
+          advanceProviderFromQueue({
+            provider: 'openai',
+            sessionId,
+            modelRunId,
+            refinedPrompt: session.refined_prompt as string,
+            userId: session.user_id,
+            opts
+          })
+      })
+    );
   }
+
   if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed') {
     const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
@@ -882,7 +780,52 @@ async function runProvidersLegacy(
       queuedAt: nowIso,
       lastPolledAt: nowIso
     });
+    if (session?.refined_prompt) {
+      const job = buildDeepResearchJob({
+        topicId: sessionId,
+        modelRunId: modelRunId ?? `legacy:gemini:${sessionId}`,
+        provider: 'gemini',
+        attempt: 1
+      });
+      laneJobs.push(
+        enqueueGeminiLaneJob({
+          job,
+          task: () =>
+            advanceProviderFromQueue({
+              provider: 'gemini',
+              sessionId,
+              modelRunId,
+              refinedPrompt: session.refined_prompt as string,
+              userId: session.user_id,
+              opts
+            })
+        })
+      );
+    }
+  } else if (existingGemini?.status === 'running' && !opts?.skipGemini && session?.refined_prompt) {
+    const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
+    const job = buildDeepResearchJob({
+      topicId: sessionId,
+      modelRunId: modelRunId ?? `legacy:gemini:${sessionId}`,
+      provider: 'gemini',
+      attempt: 1
+    });
+    laneJobs.push(
+      enqueueGeminiLaneJob({
+        job,
+        task: () =>
+          advanceProviderFromQueue({
+            provider: 'gemini',
+            sessionId,
+            modelRunId,
+            refinedPrompt: session.refined_prompt as string,
+            userId: session.user_id,
+            opts
+          })
+      })
+    );
   }
+
   if (opts?.skipGemini && existingGemini?.status !== 'completed') {
     const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
     await upsertProviderResult({
@@ -895,7 +838,7 @@ async function runProvidersLegacy(
       lastPolledAt: nowIso
     });
   }
-  await kickProviderQueues(opts);
+  await Promise.all(laneJobs);
 }
 
 async function syncSessionLegacy(
@@ -948,7 +891,7 @@ async function syncSessionLegacy(
     const geminiFailed = gemini2?.status === 'failed' || gemini2?.status === 'skipped';
     await finalizeReport(sessionId, openaiFailed, geminiFailed, opts);
   }
-  await kickProviderQueues(opts as any);
+  // Legacy sync path only performs queued-stale repair and terminal aggregation checks.
 }
 
 export async function runProviders(
