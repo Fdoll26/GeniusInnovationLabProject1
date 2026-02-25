@@ -10,6 +10,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "tests": "vitest run",
+    "db:rollback": "bash db/scripts/rollback-migration.sh",
     "seed": "psql \"$DATABASE_URL\" -f db/seed/seed.sql",
     "test:watch": "vitest"
   },

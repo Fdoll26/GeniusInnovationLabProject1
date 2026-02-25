@@ -405,6 +405,17 @@ export async function getSessionResearchSnapshotByProvider(sessionId: string, pr
   return { run, steps, sources, evidence };
 }
 
+export async function getResearchSnapshotByRunId(runId: string) {
+  const run = await getResearchRunById(runId);
+  if (!run) return null;
+  const [steps, sources, evidence] = await Promise.all([
+    listResearchSteps(run.id),
+    listResearchSources(run.id),
+    listResearchEvidence(run.id)
+  ]);
+  return { run, steps, sources, evidence };
+}
+
 export async function listSessionResearchSnapshots(sessionId: string) {
   const runs = await listResearchRunsBySessionId(sessionId);
   const out: Array<{ run: (typeof runs)[number]; steps: unknown[]; sources: unknown[]; evidence: unknown[] }> = [];

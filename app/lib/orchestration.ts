@@ -9,7 +9,9 @@ import { sendReportEmail } from './email-sender';
 import type { SessionState } from './session-state';
 import { getUserSettings } from './user-settings-repo';
 import { pool } from './db';
-import { getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
+import { getResearchSnapshotByRunId, getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
+import { parseDeepResearchJobPayload, type DeepResearchJobPayload } from './deep-research-job';
+import { updateResearchRun } from './research-run-repo';
 
 const providerQueueKeys = {
   openai: 'deep_research_queue_openai_v1',
@@ -427,9 +429,166 @@ async function withProviderQueueLock<T>(
   }
 }
 
+type DeepResearchTransitionContext = {
+  topicId: string;
+  modelRunId: string;
+  provider: 'openai' | 'gemini';
+  stepId: string | null;
+  jobId: string;
+  attempt: number;
+  providerResponseId?: string | null;
+  status?: string;
+  message?: string;
+};
+
+function extractStepId(progress: unknown): string | null {
+  if (!progress || typeof progress !== 'object') return null;
+  const stepId = (progress as Record<string, unknown>).step_id;
+  return typeof stepId === 'string' && stepId.trim() ? stepId : null;
+}
+
+function logDeepResearchTransition(event: string, context: DeepResearchTransitionContext) {
+  console.info(
+    JSON.stringify({
+      event: `deep_research.${event}`,
+      topicId: context.topicId,
+      modelRunId: context.modelRunId,
+      provider: context.provider,
+      stepId: context.stepId,
+      jobId: context.jobId,
+      attempt: context.attempt,
+      providerResponseId: context.providerResponseId ?? null,
+      status: context.status ?? null,
+      message: context.message ?? null
+    })
+  );
+}
+
+function buildDeepResearchJob(params: {
+  topicId: string;
+  modelRunId: string;
+  provider: 'openai' | 'gemini';
+  attempt: number;
+}): DeepResearchJobPayload {
+  return parseDeepResearchJobPayload({
+    topicId: params.topicId,
+    modelRunId: params.modelRunId,
+    provider: params.provider,
+    attempt: params.attempt,
+    idempotencyKey: `${params.provider}:${params.topicId}:${params.modelRunId}:${params.attempt}`
+  });
+}
+
+async function processDeepResearchJob(params: {
+  job: DeepResearchJobPayload;
+}) {
+  const { job } = params;
+  const snapshot = await getResearchSnapshotByRunId(job.modelRunId);
+  const stepId = snapshot ? extractStepId(snapshot.run.progress_json) : null;
+  const logContext: DeepResearchTransitionContext = {
+    topicId: job.topicId,
+    modelRunId: job.modelRunId,
+    provider: job.provider,
+    stepId,
+    jobId: job.idempotencyKey,
+    attempt: job.attempt
+  };
+
+  logDeepResearchTransition('received', { ...logContext, status: 'running' });
+
+  if (!snapshot) {
+    const errorMessage = `ModelRun ${job.modelRunId} not found for job ${job.idempotencyKey}`;
+    await upsertProviderResult({
+      sessionId: job.topicId,
+      modelRunId: job.modelRunId,
+      provider: job.provider,
+      status: 'failed',
+      errorMessage,
+      completedAt: new Date().toISOString(),
+      lastPolledAt: new Date().toISOString()
+    });
+    logDeepResearchTransition('failed', { ...logContext, status: 'failed', message: errorMessage });
+    return { terminal: true as const };
+  }
+
+  const mismatch: string[] = [];
+  if (snapshot.run.session_id !== job.topicId) {
+    mismatch.push(`topic_id mismatch: run.session_id=${snapshot.run.session_id}, job.topicId=${job.topicId}`);
+  }
+  if (snapshot.run.provider !== job.provider) {
+    mismatch.push(`provider mismatch: run.provider=${snapshot.run.provider}, job.provider=${job.provider}`);
+  }
+  if (mismatch.length > 0) {
+    const errorMessage = `Deep research job/model mismatch: ${mismatch.join('; ')}`;
+    await updateResearchRun({
+      runId: job.modelRunId,
+      state: 'FAILED',
+      errorMessage,
+      completed: true
+    });
+    await upsertProviderResult({
+      sessionId: job.topicId,
+      modelRunId: job.modelRunId,
+      provider: job.provider,
+      status: 'failed',
+      errorMessage,
+      completedAt: new Date().toISOString(),
+      lastPolledAt: new Date().toISOString()
+    });
+    logDeepResearchTransition('guard_failed', { ...logContext, status: 'failed', message: errorMessage });
+    return { terminal: true as const };
+  }
+
+  const nowIso = new Date().toISOString();
+  await upsertProviderResult({
+    sessionId: job.topicId,
+    modelRunId: job.modelRunId,
+    provider: job.provider,
+    status: 'running',
+    startedAt: nowIso,
+    lastPolledAt: nowIso
+  });
+  logDeepResearchTransition('running', { ...logContext, status: 'running' });
+
+  const tickResult = await tick(job.modelRunId);
+  const completedSnapshot = await getResearchSnapshotByRunId(job.modelRunId);
+  const nextStepId = completedSnapshot ? extractStepId(completedSnapshot.run.progress_json) : null;
+
+  if (tickResult.done) {
+    await upsertProviderResult({
+      sessionId: job.topicId,
+      modelRunId: job.modelRunId,
+      provider: job.provider,
+      status: tickResult.state === 'FAILED' ? 'failed' : 'completed',
+      outputText: completedSnapshot?.run?.synthesized_report_md ?? null,
+      sources: completedSnapshot?.sources ?? null,
+      errorMessage: tickResult.state === 'FAILED' ? completedSnapshot?.run?.error_message ?? 'Provider run failed' : null,
+      completedAt: new Date().toISOString(),
+      lastPolledAt: new Date().toISOString()
+    });
+    logDeepResearchTransition('terminal', {
+      ...logContext,
+      stepId: nextStepId,
+      status: tickResult.state === 'FAILED' ? 'failed' : 'completed'
+    });
+    return { terminal: true as const };
+  }
+
+  await upsertProviderResult({
+    sessionId: job.topicId,
+    modelRunId: job.modelRunId,
+    provider: job.provider,
+    status: 'running',
+    lastPolledAt: new Date().toISOString()
+  });
+  logDeepResearchTransition('progressed', { ...logContext, stepId: nextStepId, status: 'running' });
+  return { terminal: false as const };
+}
+
 async function advanceProviderFromQueue(params: {
   provider: 'openai' | 'gemini';
   sessionId: string;
+  modelRunId?: string | null;
   refinedPrompt: string;
   userId: string;
   opts?: {
@@ -443,8 +602,18 @@ async function advanceProviderFromQueue(params: {
   const nowIso = new Date().toISOString();
   const skip = params.provider === 'openai' ? params.opts?.skipOpenAI : params.opts?.skipGemini;
   if (skip) {
+    logDeepResearchTransition('terminal', {
+      topicId: params.sessionId,
+      modelRunId: params.modelRunId ?? 'skip:no-model-run',
+      provider: params.provider,
+      stepId: null,
+      jobId: `${params.provider}:${params.sessionId}:skip`,
+      attempt: 1,
+      status: 'skipped'
+    });
     await upsertProviderResult({
       sessionId: params.sessionId,
+      modelRunId: params.modelRunId ?? null,
       provider: params.provider,
       status: 'skipped',
       outputText: `${params.provider} run skipped (debug)`,
@@ -456,6 +625,15 @@ async function advanceProviderFromQueue(params: {
 
   if (!process.env.DATABASE_URL) {
     const settings = await getUserSettings(params.userId);
+    const legacyJobId = `${params.provider}:${params.sessionId}:legacy`;
+    const legacyContext: DeepResearchTransitionContext = {
+      topicId: params.sessionId,
+      modelRunId: 'legacy:no-model-run',
+      provider: params.provider,
+      stepId: null,
+      jobId: legacyJobId,
+      attempt: 1
+    };
     try {
       if (params.provider === 'openai') {
         const started = await startResearchJob(params.refinedPrompt, {
@@ -473,6 +651,11 @@ async function advanceProviderFromQueue(params: {
           completedAt: new Date().toISOString(),
           lastPolledAt: new Date().toISOString()
         });
+        logDeepResearchTransition('terminal', {
+          ...legacyContext,
+          providerResponseId: started.responseId,
+          status: 'completed'
+        });
       } else {
         const out = await runGemini(params.refinedPrompt, {
           stub: params.opts?.stubGemini ?? params.opts?.stub,
@@ -488,6 +671,7 @@ async function advanceProviderFromQueue(params: {
           completedAt: new Date().toISOString(),
           lastPolledAt: new Date().toISOString()
         });
+        logDeepResearchTransition('terminal', { ...legacyContext, status: 'completed' });
       }
       return { terminal: true as const };
     } catch (error) {
@@ -499,11 +683,22 @@ async function advanceProviderFromQueue(params: {
         completedAt: new Date().toISOString(),
         lastPolledAt: new Date().toISOString()
       });
+      logDeepResearchTransition('failed', {
+        ...legacyContext,
+        status: 'failed',
+        message: error instanceof Error ? error.message : 'Provider error'
+      });
       return { terminal: true as const };
     }
   }
 
-  let snapshot = await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  let snapshot =
+    params.modelRunId
+      ? await getResearchSnapshotByRunId(params.modelRunId)
+      : await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  if (snapshot && (snapshot.run.session_id !== params.sessionId || snapshot.run.provider !== params.provider)) {
+    snapshot = null;
+  }
   const shouldStart =
     !snapshot ||
     snapshot.run.state === 'FAILED' ||
@@ -521,6 +716,7 @@ async function advanceProviderFromQueue(params: {
   if (!snapshot) {
     await upsertProviderResult({
       sessionId: params.sessionId,
+      modelRunId: params.modelRunId ?? null,
       provider: params.provider,
       status: 'failed',
       errorMessage: 'Failed to initialize provider research run',
@@ -529,38 +725,16 @@ async function advanceProviderFromQueue(params: {
     });
     return { terminal: true as const };
   }
-
-  await upsertProviderResult({
-    sessionId: params.sessionId,
+  const job = buildDeepResearchJob({
+    topicId: params.sessionId,
+    modelRunId: snapshot.run.id,
     provider: params.provider,
-    status: 'running',
-    startedAt: nowIso,
-    lastPolledAt: nowIso
+    attempt: 1
   });
 
-  const tickResult = await tick(snapshot.run.id);
-  const completedSnapshot = await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
-  if (tickResult.done) {
-    await upsertProviderResult({
-      sessionId: params.sessionId,
-      provider: params.provider,
-      status: tickResult.state === 'FAILED' ? 'failed' : 'completed',
-      outputText: completedSnapshot?.run?.synthesized_report_md ?? null,
-      sources: completedSnapshot?.sources ?? null,
-      errorMessage: tickResult.state === 'FAILED' ? completedSnapshot?.run?.error_message ?? 'Provider run failed' : null,
-      completedAt: new Date().toISOString(),
-      lastPolledAt: new Date().toISOString()
-    });
-    return { terminal: true as const };
-  }
-
-  await upsertProviderResult({
-    sessionId: params.sessionId,
-    provider: params.provider,
-    status: 'running',
-    lastPolledAt: new Date().toISOString()
+  return processDeepResearchJob({
+    job
   });
-  return { terminal: false as const };
 }
 
 async function processProviderQueue(
@@ -583,6 +757,7 @@ async function processProviderQueue(
     if (!session?.refined_prompt) {
       await upsertProviderResult({
         sessionId: target.session_id,
+        modelRunId: target.model_run_id ?? null,
         provider,
         status: 'failed',
         errorMessage: 'Refined prompt missing',
@@ -595,6 +770,7 @@ async function processProviderQueue(
     const result = await advanceProviderFromQueue({
       provider,
       sessionId: target.session_id,
+      modelRunId: target.model_run_id ?? null,
       refinedPrompt: session.refined_prompt,
       userId: session.user_id,
       opts
@@ -640,11 +816,42 @@ async function runProvidersLegacy(
   const nowIso = new Date().toISOString();
   const existingResults = await listProviderResults(sessionId);
   const existingByProvider = new Map(existingResults.map((r) => [r.provider, r]));
+  const session = await getSessionById(sessionId);
+
+  const ensureModelRunId = async (provider: 'openai' | 'gemini', existingModelRunId?: string | null) => {
+    if (!process.env.DATABASE_URL) {
+      return null;
+    }
+    if (existingModelRunId) {
+      const existingSnapshot = await getResearchSnapshotByRunId(existingModelRunId);
+      if (existingSnapshot && existingSnapshot.run.session_id === sessionId && existingSnapshot.run.provider === provider) {
+        return existingSnapshot.run.id;
+      }
+    }
+    const latest = await getSessionResearchSnapshotByProvider(sessionId, provider);
+    if (latest && latest.run.state !== 'FAILED' && latest.run.state !== 'DONE') {
+      return latest.run.id;
+    }
+    if (!session?.refined_prompt) {
+      return null;
+    }
+    await startRun({
+      sessionId,
+      userId: session.user_id,
+      question: session.refined_prompt,
+      provider,
+      allowClarifications: false
+    });
+    const created = await getSessionResearchSnapshotByProvider(sessionId, provider);
+    return created?.run.id ?? null;
+  };
 
   const existingOpenAi = existingByProvider.get('openai');
   if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && !opts?.skipOpenAI) {
+    const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
+      modelRunId,
       provider: 'openai',
       status: 'queued',
       queuedAt: nowIso,
@@ -652,8 +859,10 @@ async function runProvidersLegacy(
     });
   }
   if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed') {
+    const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
+      modelRunId,
       provider: 'openai',
       status: 'skipped',
       outputText: 'OpenAI run skipped (debug)',
@@ -664,8 +873,10 @@ async function runProvidersLegacy(
 
   const existingGemini = existingByProvider.get('gemini');
   if (existingGemini?.status !== 'completed' && existingGemini?.status !== 'running' && !opts?.skipGemini) {
+    const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
+      modelRunId,
       provider: 'gemini',
       status: 'queued',
       queuedAt: nowIso,
@@ -673,8 +884,10 @@ async function runProvidersLegacy(
     });
   }
   if (opts?.skipGemini && existingGemini?.status !== 'completed') {
+    const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
+      modelRunId,
       provider: 'gemini',
       status: 'skipped',
       outputText: 'Gemini run skipped (debug)',
@@ -697,7 +910,10 @@ async function syncSessionLegacy(
   const openai = results.find((r) => r.provider === 'openai');
   const gemini = results.find((r) => r.provider === 'gemini');
 
-  const maybeRepairQueued = async (provider: 'openai' | 'gemini', result?: { status?: string; started_at?: string | null; last_polled_at?: string | null }) => {
+  const maybeRepairQueued = async (
+    provider: 'openai' | 'gemini',
+    result?: { status?: string; model_run_id?: string | null; started_at?: string | null; last_polled_at?: string | null }
+  ) => {
     if (!result || result.status !== 'queued') return;
     if (result.started_at) return;
     const sinceRaw = result.last_polled_at ?? session.updated_at ?? session.created_at ?? null;
@@ -706,6 +922,7 @@ async function syncSessionLegacy(
     if (Date.now() - sinceMs <= queuedStaleMs) return;
     await upsertProviderResult({
       sessionId,
+      modelRunId: result?.model_run_id ?? null,
       provider,
       status: 'failed',
       errorMessage: 'Provider work was queued too long (likely interrupted). Retry to run again.',

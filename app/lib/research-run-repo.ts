@@ -14,6 +14,7 @@ import type {
 export type ResearchRunRecord = {
   id: string;
   session_id: string;
+  attempt: number;
   state: ResearchWorkflowState;
   provider: ResearchProviderName;
   mode: ResearchMode;
@@ -108,25 +109,43 @@ export async function createResearchRun(params: {
   maxTokensPerStep: number;
   minWordCount: number;
 }): Promise<ResearchRunRecord> {
-  const rows = await query<ResearchRunRecord>(
-    `INSERT INTO research_runs
-      (session_id, provider, mode, depth, question, max_steps, target_sources_per_step, max_total_sources, max_tokens_per_step, min_word_count)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-     RETURNING *`,
-    [
-      params.sessionId,
-      params.provider,
-      params.mode,
-      params.depth,
-      params.question,
-      params.maxSteps,
-      params.targetSourcesPerStep,
-      params.maxTotalSources,
-      params.maxTokensPerStep,
-      params.minWordCount
-    ]
-  );
-  return rows[0];
+  const values = [
+    params.sessionId,
+    params.provider,
+    params.mode,
+    params.depth,
+    params.question,
+    params.maxSteps,
+    params.targetSourcesPerStep,
+    params.maxTotalSources,
+    params.maxTokensPerStep,
+    params.minWordCount
+  ];
+  for (let i = 0; i < 3; i += 1) {
+    try {
+      const rows = await query<ResearchRunRecord>(
+        `INSERT INTO research_runs
+          (session_id, attempt, provider, mode, depth, question, max_steps, target_sources_per_step, max_total_sources, max_tokens_per_step, min_word_count)
+         SELECT
+          $1,
+          COALESCE(MAX(attempt), 0) + 1,
+          $2,$3,$4,$5,$6,$7,$8,$9,$10
+         FROM research_runs
+         WHERE session_id = $1
+           AND provider = $2
+         RETURNING *`,
+        values
+      );
+      return rows[0];
+    } catch (error) {
+      const code = typeof error === 'object' && error && 'code' in error ? String((error as { code?: unknown }).code) : '';
+      if (code === '23505') {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Failed to create research run for session ${params.sessionId} provider ${params.provider}`);
 }
 
 export async function getLatestResearchRunBySessionId(sessionId: string): Promise<ResearchRunRecord | null> {
@@ -134,7 +153,7 @@ export async function getLatestResearchRunBySessionId(sessionId: string): Promis
     `SELECT *
      FROM research_runs
      WHERE session_id = $1
-     ORDER BY created_at DESC
+     ORDER BY attempt DESC, created_at DESC
      LIMIT 1`,
     [sessionId]
   );
@@ -146,7 +165,7 @@ export async function listResearchRunsBySessionId(sessionId: string): Promise<Re
     `SELECT *
      FROM research_runs
      WHERE session_id = $1
-     ORDER BY created_at DESC`,
+     ORDER BY provider ASC, attempt DESC, created_at DESC`,
     [sessionId]
   );
 }
@@ -159,7 +178,7 @@ export async function getLatestResearchRunBySessionProvider(
     `SELECT *
      FROM research_runs
      WHERE session_id = $1 AND provider = $2
-     ORDER BY created_at DESC
+     ORDER BY attempt DESC, created_at DESC
      LIMIT 1`,
     [sessionId, provider]
   );
