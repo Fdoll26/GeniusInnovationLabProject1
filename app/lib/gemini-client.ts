@@ -93,6 +93,49 @@ function looksTruncated(text: string): boolean {
   return !'.?!)]}"\''.includes(last);
 }
 
+function sanitizeSchemaForGemini(schema: unknown): unknown {
+  if (schema == null || typeof schema !== 'object') return schema;
+  if (Array.isArray(schema)) return schema.map((item) => sanitizeSchemaForGemini(item));
+
+  const input = schema as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  const allowedKeys = new Set([
+    'type',
+    'properties',
+    'required',
+    'items',
+    'enum',
+    'description',
+    'nullable',
+    'format',
+    'minItems',
+    'maxItems',
+    'minLength',
+    'maxLength',
+    'minimum',
+    'maximum'
+  ]);
+
+  for (const [key, rawValue] of Object.entries(input)) {
+    if (!allowedKeys.has(key)) continue;
+    if (key === 'properties' && rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue)) {
+      const properties: Record<string, unknown> = {};
+      for (const [propName, propSchema] of Object.entries(rawValue as Record<string, unknown>)) {
+        properties[propName] = sanitizeSchemaForGemini(propSchema);
+      }
+      out.properties = properties;
+      continue;
+    }
+    if (key === 'items') {
+      out.items = sanitizeSchemaForGemini(rawValue);
+      continue;
+    }
+    out[key] = rawValue;
+  }
+
+  return out;
+}
+
 type GeminiGroundingMetadata = {
   webSearchQueries?: string[];
   groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
@@ -177,6 +220,11 @@ function isGeminiToolsNotSupportedError(message: string): boolean {
     text.includes('google_search') &&
     (text.includes('not supported') || text.includes('unsupported') || text.includes('unknown name') || text.includes('unknown field'))
   );
+}
+
+function isGeminiInvalidArgumentError(message: string): boolean {
+  const text = message.toLowerCase();
+  return text.includes('invalid_argument') || (text.includes('"code": 400') && text.includes('invalid argument'));
 }
 
 export async function startRefinementGemini(
@@ -510,24 +558,54 @@ export async function runGeminiReasoningStep(params: {
   groundingMetadata?: { groundingChunks: unknown[]; groundingSupports: unknown[] };
 }> {
   const model = params.model || geminiModel;
-  const useSearch = params.useSearch ?? true;
-  const data = await request(
-    `/models/${model}:generateContent`,
-    {
-      ...(useSearch ? { tools: [{ google_search: {} }] } : {}),
-      contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
-      generationConfig: {
-        maxOutputTokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
-        ...(params.structuredOutput
-          ? {
-              responseMimeType: 'application/json',
-              responseSchema: params.structuredOutput.jsonSchema
-            }
-          : {})
+  const desiredSearch = params.useSearch ?? true;
+  const desiredStructured = Boolean(params.structuredOutput);
+  const maxOutputTokens = Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens)));
+
+  const run = async (opts: { useSearch: boolean; useStructured: boolean }) =>
+    request(
+      `/models/${model}:generateContent`,
+      {
+        ...(opts.useSearch ? { tools: [{ google_search: {} }] } : {}),
+        contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
+        generationConfig: {
+          maxOutputTokens,
+          ...(opts.useStructured && params.structuredOutput
+            ? {
+                responseMimeType: 'application/json',
+                responseSchema: sanitizeSchemaForGemini(params.structuredOutput.jsonSchema)
+              }
+            : {})
+        }
+      },
+      { timeoutMs: params.timeoutMs }
+    );
+
+  let data: unknown;
+  try {
+    data = await run({ useSearch: desiredSearch, useStructured: desiredStructured });
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error);
+    if (!isGeminiInvalidArgumentError(msg)) {
+      throw error;
+    }
+
+    if (desiredSearch) {
+      try {
+        data = await run({ useSearch: false, useStructured: desiredStructured });
+      } catch (errorNoSearch) {
+        const msgNoSearch = errorNoSearch instanceof Error ? errorNoSearch.message : String(errorNoSearch);
+        if (!desiredStructured || !isGeminiInvalidArgumentError(msgNoSearch)) {
+          throw errorNoSearch;
+        }
+        data = await run({ useSearch: false, useStructured: false });
       }
-    },
-    { timeoutMs: params.timeoutMs }
-  );
+    } else if (desiredStructured) {
+      data = await run({ useSearch: false, useStructured: false });
+    } else {
+      throw error;
+    }
+  }
   const text = extractTextFromGemini(data).trim();
   const grounding = getGeminiGroundingMetadata(data);
   return {

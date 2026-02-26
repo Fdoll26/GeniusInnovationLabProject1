@@ -17,13 +17,14 @@ describe('research workflow transitions', () => {
     ]);
   });
 
-  it('allows only direct transitions plus gap-loop back to discover', () => {
+  it('allows forward transitions plus gap-loop back to discover', () => {
     expect(canTransitionStep('DEVELOP_RESEARCH_PLAN', 'DISCOVER_SOURCES_WITH_PLAN')).toBe(true);
     expect(canTransitionStep('DEEP_READ', 'EXTRACT_EVIDENCE')).toBe(true);
+    expect(canTransitionStep('EXTRACT_EVIDENCE', 'SECTION_SYNTHESIS')).toBe(true);
     expect(canTransitionStep('GAP_CHECK', 'DISCOVER_SOURCES_WITH_PLAN')).toBe(true);
 
-    expect(canTransitionStep('DEVELOP_RESEARCH_PLAN', 'DEEP_READ')).toBe(false);
-    expect(canTransitionStep('SHORTLIST_RESULTS', 'COUNTERPOINTS')).toBe(false);
+    expect(canTransitionStep('DEEP_READ', 'DISCOVER_SOURCES_WITH_PLAN')).toBe(false);
+    expect(canTransitionStep('SHORTLIST_RESULTS', 'DEVELOP_RESEARCH_PLAN')).toBe(false);
     expect(canTransitionStep('SECTION_SYNTHESIS', 'GAP_CHECK')).toBe(false);
   });
 

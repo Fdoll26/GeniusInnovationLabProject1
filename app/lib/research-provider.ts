@@ -4,7 +4,8 @@ import {
   getResponsePrimaryMessageContent,
   getResponseSources,
   runOpenAiReasoningStep,
-  startResearchJob
+  startResearchJob,
+  waitDeepResearch
 } from './openai-client';
 import { getResearchProviderConfig } from './research-config';
 import { normalizeProviderCitations } from './citation-normalizer';
@@ -246,12 +247,22 @@ async function runDeep(params: {
       maxSources: params.sourceTarget,
       model: params.model
     });
+    const finalData =
+      out.responseId && out.status !== 'completed'
+        ? await waitDeepResearch(out.responseId, { timeoutMs: params.timeoutMs })
+        : out.data;
+    const finalStatus = (finalData as { status?: unknown })?.status;
+    if (typeof finalStatus === 'string' && finalStatus !== 'completed') {
+      throw new Error(`OpenAI deep research ended with status=${finalStatus}`);
+    }
+    const outputText = getResponseOutputText(finalData);
+    const primary = getResponsePrimaryMessageContent(finalData);
     return {
-      text: getResponseOutputText(out.data),
+      text: outputText,
       usage: null,
-      rawSources: getResponseSources(out.data) ?? null,
-      providerNativeOutput: getResponsePrimaryMessageContent(out.data)?.text ?? getResponseOutputText(out.data),
-      providerNativeCitationMetadata: getResponsePrimaryMessageContent(out.data)?.annotations ?? null
+      rawSources: getResponseSources(finalData) ?? null,
+      providerNativeOutput: primary?.text ?? outputText,
+      providerNativeCitationMetadata: primary?.annotations ?? null
     };
   }
 

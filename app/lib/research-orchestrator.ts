@@ -1,5 +1,4 @@
 import { getUserSettings } from './user-settings-repo';
-import { pool } from './db';
 import {
   createResearchRun,
   getLatestResearchRunBySessionId,
@@ -88,37 +87,6 @@ function isRetryableResearchError(error: unknown): boolean {
   );
 }
 
-async function withProviderDeepResearchLock<T>(
-  provider: 'openai' | 'gemini',
-  fn: () => Promise<T>
-): Promise<{ acquired: true; value: T } | { acquired: false }> {
-  if (!pool) {
-    const value = await fn();
-    return { acquired: true, value };
-  }
-
-  const client = await pool.connect();
-  const lockKey = `deep_research_provider:${provider}`;
-  try {
-    const rows = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey]);
-    if (!rows.rows[0]?.ok) {
-      return { acquired: false };
-    }
-    try {
-      const value = await fn();
-      return { acquired: true, value };
-    } finally {
-      try {
-        await client.query('SELECT pg_advisory_unlock(hashtext($1))', [lockKey]);
-      } catch {
-        // best-effort unlock
-      }
-    }
-  } finally {
-    client.release();
-  }
-}
-
 function summarizePriorSteps(steps: Awaited<ReturnType<typeof listResearchSteps>>) {
   return steps
     .slice(-4)
@@ -172,38 +140,20 @@ async function executePlannedStep(params: {
     }
   });
 
-  const lock = await withProviderDeepResearchLock(run.provider, async () => {
-    const stepsNow = await listResearchSteps(runId);
-    const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
-    return executePipelineStep({
-      provider: run.provider,
-      stepType: stepId,
-      question: run.question,
-      timeoutMs: (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
-      plan,
-      priorStepSummary: summarizePriorSteps(stepsNow),
-      sourceTarget: clamp(run.target_sources_per_step, 1, 30),
-      maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
-      maxCandidates: providerCfg.max_candidates,
-      shortlistSize: providerCfg.shortlist_size
-    });
+  const stepsNow = await listResearchSteps(runId);
+  const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
+  const artifact = await executePipelineStep({
+    provider: run.provider,
+    stepType: stepId,
+    question: run.question,
+    timeoutMs: (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
+    plan,
+    priorStepSummary: summarizePriorSteps(stepsNow),
+    sourceTarget: clamp(run.target_sources_per_step, 1, 30),
+    maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
+    maxCandidates: providerCfg.max_candidates,
+    shortlistSize: providerCfg.shortlist_size
   });
-
-  if (!lock.acquired) {
-    await upsertResearchStep({
-      runId,
-      stepIndex: currentIndex,
-      stepType: stepId,
-      status: 'queued',
-      provider: run.provider,
-      mode: run.mode,
-      stepGoal: `Waiting lock: ${stepId}`,
-      inputsSummary: 'Provider lock busy; will retry.'
-    });
-    return { status: 'retry' as const };
-  }
-
-  const artifact = lock.value;
   const completedStep = await upsertResearchStep({
     runId,
     stepIndex: currentIndex,
@@ -393,10 +343,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       currentIndex,
       totalSteps
     });
-    if (execution.status === 'retry') {
-      return { state: 'IN_PROGRESS', done: false };
-    }
     const artifact = execution.artifact;
+    const synthesizedText = (artifact.output_text_with_refs ?? artifact.raw_output_text ?? '').trim();
 
     if (stepId === 'DEVELOP_RESEARCH_PLAN') {
       const nextPlan = artifact.updatedPlan ?? parseJson<ResearchPlan | null>(run.research_plan_json, null);
@@ -425,6 +373,9 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
 
     const nextIndex = currentIndex + 1;
     const isDone = nextIndex >= totalSteps;
+    if (stepId === 'SECTION_SYNTHESIS' && !synthesizedText) {
+      throw new Error('Empty synthesis output from provider');
+    }
     await updateResearchRun({
       runId,
       currentStepIndex: nextIndex,
@@ -436,7 +387,7 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         gap_loops: Number(progress.gap_loops ?? 0)
       },
       state: isDone ? 'DONE' : 'IN_PROGRESS',
-      synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? artifact.output_text_with_refs ?? artifact.raw_output_text : undefined,
+      synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? synthesizedText : undefined,
       synthesizedSources:
         stepId === 'SECTION_SYNTHESIS'
           ? ((artifact.references ?? []) as unknown as Array<Record<string, unknown>>)

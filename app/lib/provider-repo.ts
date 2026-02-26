@@ -18,6 +18,25 @@ export type ProviderResultRecord = {
   last_polled_at?: string | null;
 };
 
+function normalizeJsonValue(value: unknown): unknown | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return { raw: value };
+    }
+  }
+  return value;
+}
+
+function jsonOrNull(value: unknown): string | null {
+  const normalized = normalizeJsonValue(value);
+  return normalized == null ? null : JSON.stringify(normalized);
+}
+
 export async function upsertProviderResult(params: {
   sessionId: string;
   modelRunId?: string | null;
@@ -34,6 +53,7 @@ export async function upsertProviderResult(params: {
   externalStatus?: string | null;
   lastPolledAt?: string | null;
 }) {
+  const normalizedSources = jsonOrNull(params.sources);
   try {
     const rows = await query<{ id: string }>(
       `INSERT INTO provider_results
@@ -56,6 +76,10 @@ export async function upsertProviderResult(params: {
        WHERE EXCLUDED.model_run_id IS NULL
          OR provider_results.model_run_id IS NULL
          OR provider_results.model_run_id = EXCLUDED.model_run_id
+         OR provider_results.status IN ('completed', 'failed', 'skipped', 'stubbed')
+         OR provider_results.completed_at IS NOT NULL
+         OR (EXCLUDED.status = 'queued' AND provider_results.status <> 'running')
+         OR (EXCLUDED.status = 'running' AND provider_results.status = 'queued')
        RETURNING id`,
       [
         params.sessionId,
@@ -63,7 +87,7 @@ export async function upsertProviderResult(params: {
         params.provider,
         params.status,
         params.outputText ?? null,
-        params.sources ?? null,
+        normalizedSources,
         params.errorCode ?? null,
         params.errorMessage ?? null,
         params.queuedAt ?? null,
@@ -105,7 +129,7 @@ export async function upsertProviderResult(params: {
           params.provider,
           params.status,
           params.outputText ?? null,
-          params.sources ?? null,
+          normalizedSources,
           params.errorCode ?? null,
           params.errorMessage ?? null,
           params.queuedAt ?? null,

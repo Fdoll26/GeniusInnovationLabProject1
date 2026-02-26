@@ -90,7 +90,6 @@ export const RESEARCH_PLAN_STEP_SCHEMA: Record<string, unknown> = {
       type: 'array',
       minItems: 1,
       maxItems: 8,
-      uniqueItems: true,
       items: { type: 'string', enum: SOURCE_TYPES }
     },
     search_query_pack: {

@@ -9,6 +9,8 @@ export type DeepResearchJobPayload = {
   idempotencyKey: string;
 };
 
+const SAFE_ID_PATTERN = /^\S{1,200}$/;
+
 function asRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('Deep research job payload must be an object');
@@ -21,7 +23,11 @@ function requireNonEmptyString(record: Record<string, unknown>, field: keyof Dee
   if (typeof value !== 'string' || !value.trim()) {
     throw new Error(`Deep research job payload "${String(field)}" must be a non-empty string`);
   }
-  return value.trim();
+  const trimmed = value.trim();
+  if (!SAFE_ID_PATTERN.test(trimmed)) {
+    throw new Error(`Deep research job payload "${String(field)}" has invalid format`);
+  }
+  return trimmed;
 }
 
 export function parseDeepResearchJobPayload(raw: unknown): DeepResearchJobPayload {
@@ -37,6 +43,12 @@ export function parseDeepResearchJobPayload(raw: unknown): DeepResearchJobPayloa
   const idempotencyKey = idempotencyRaw || jobIdRaw;
   if (!idempotencyKey) {
     throw new Error('Deep research job payload requires non-empty "jobId" or "idempotencyKey"');
+  }
+  if (!SAFE_ID_PATTERN.test(idempotencyKey)) {
+    throw new Error('Deep research job payload "idempotencyKey" has invalid format');
+  }
+  if (jobIdRaw && !SAFE_ID_PATTERN.test(jobIdRaw)) {
+    throw new Error('Deep research job payload "jobId" has invalid format');
   }
   const attemptValue = record.attempt;
   if (!Number.isInteger(attemptValue) || Number(attemptValue) < 1) {

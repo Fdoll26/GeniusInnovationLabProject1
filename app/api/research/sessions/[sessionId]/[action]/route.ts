@@ -19,7 +19,16 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
 
   if (process.env.DATABASE_URL) {
     try {
-      await syncSession(sessionId);
+      const debug = await getDebugFlags();
+      await syncSession(sessionId, {
+        stub: debug.stubExternals,
+        stubOpenAI: debug.stubOpenAI,
+        stubGemini: debug.stubGemini,
+        stubPdf: debug.stubPdf,
+        stubEmail: debug.stubEmail,
+        skipOpenAI: debug.skipOpenAI,
+        skipGemini: debug.skipGemini
+      });
     } catch {
       // best-effort; status polling should not hard-fail on sync errors
     }

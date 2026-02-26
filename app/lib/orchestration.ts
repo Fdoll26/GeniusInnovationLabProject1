@@ -1,3 +1,4 @@
+import './debug-errors';
 import { getResponseOutputText, getResponseSources, pollDeepResearch, startResearchJob, startRefinement, rewritePrompt, summarizeForReport } from './openai-client';
 import { runGemini, rewritePromptGemini, startRefinementGemini, summarizeForReportGemini } from './gemini-client';
 import { createQuestions, getNextQuestion, listQuestions } from './refinement-repo';
@@ -102,17 +103,18 @@ export async function regenerateReportForSession(
   const openaiTextWithRefs = openaiResult?.output_text ? replaceLinksWithRefs(openaiResult.output_text, globalRefMap) : null;
   const geminiTextWithRefs = geminiResult?.output_text ? replaceLinksWithRefs(geminiResult.output_text, globalRefMap) : null;
 
-  const includeRefs = settings.report_include_refs_in_summary;
+  const includeRefs = false;
   type SummaryRef = { n: number; title?: string; url: string; accessedAt?: string };
   const summarize = async (provider: 'OpenAI' | 'Gemini' | 'Combined', text: string, refs: SummaryRef[]) => {
+    const cleanText = stripSourcesSections(text);
     if (settings.summarize_provider === 'gemini') {
       return summarizeForReportGemini(
-        { provider, researchText: text, references: refs },
+        { provider, researchText: cleanText, references: refs },
         { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000, includeRefs }
       );
     }
     return summarizeForReport(
-      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: text, references: refs },
+      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: cleanText, references: refs },
       { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000, includeRefs }
     );
   };
@@ -165,11 +167,15 @@ export async function regenerateReportForSession(
       },
       { stub: opts?.stubEmail ?? opts?.stub }
     );
-    await updateReportEmail({
-      reportId: report.id,
-      emailStatus: 'sent',
-      sentAt: new Date().toISOString()
-    });
+    try {
+      await updateReportEmail({
+        reportId: report.id,
+        emailStatus: 'sent',
+        sentAt: new Date().toISOString()
+      });
+    } catch (markSentError) {
+      console.error('Regenerated report delivered but failed to mark as sent', markSentError);
+    }
   } catch (error) {
     console.error('Regenerated report email send failed', error);
     await updateReportEmail({
@@ -426,6 +432,40 @@ function parseJson<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
+function stripSourcesSections(text: string): string {
+  const normalized = text.replace(/\r\n/g, '\n');
+  const markers = ['\n## Unified Sources', '\n## Sources', '\n# Sources', '\nSources\n'];
+  let cut = -1;
+  for (const marker of markers) {
+    const idx = normalized.indexOf(marker);
+    if (idx >= 0 && (cut < 0 || idx < cut)) {
+      cut = idx;
+    }
+  }
+  return cut < 0 ? normalized : normalized.slice(0, cut).trim();
+}
+
+function sanitizeSourcesForProviderResult(sources: unknown): Array<Record<string, unknown>> | null {
+  if (!Array.isArray(sources)) return null;
+  const out: Array<Record<string, unknown>> = [];
+  for (const source of sources) {
+    if (!source || typeof source !== 'object') continue;
+    const rec = source as Record<string, unknown>;
+    const url = typeof rec.url === 'string' ? rec.url.trim() : '';
+    if (!url) continue;
+    const row: Record<string, unknown> = { url };
+    if (typeof rec.citation_id === 'string' && rec.citation_id.trim()) row.citation_id = rec.citation_id;
+    if (typeof rec.title === 'string' || rec.title == null) row.title = rec.title ?? null;
+    if (typeof rec.publisher === 'string' || rec.publisher == null) row.publisher = rec.publisher ?? null;
+    if (typeof rec.accessed_at === 'string' && rec.accessed_at.trim()) row.accessed_at = rec.accessed_at;
+    if (Array.isArray(rec.reliability_tags)) {
+      row.reliability_tags = rec.reliability_tags.filter((tag): tag is string => typeof tag === 'string');
+    }
+    out.push(row);
+  }
+  return out;
+}
+
 async function ensureStubResearchRun(params: {
   sessionId: string;
   userId: string;
@@ -558,116 +598,167 @@ async function processDeepResearchJob(params: {
   job: DeepResearchJobPayload;
 }) {
   const { job } = params;
-  const snapshot = await getResearchSnapshotByRunId(job.modelRunId);
-  const stepId = snapshot ? extractStepId(snapshot.run.progress_json) : null;
   const logContext: DeepResearchTransitionContext = {
     topicId: job.topicId,
     modelRunId: job.modelRunId,
     provider: job.provider,
-    stepId,
+    stepId: null,
     jobId: job.jobId,
     attempt: job.attempt
   };
 
   logDeepResearchTransition('received', { ...logContext, status: 'running' });
+  try {
+    const snapshot = await getResearchSnapshotByRunId(job.modelRunId);
+    const stepId = snapshot ? extractStepId(snapshot.run.progress_json) : null;
+    const runLogContext = { ...logContext, stepId };
 
-  if (!snapshot) {
-    const errorMessage = `ModelRun ${job.modelRunId} not found for job ${job.jobId}`;
+    if (!snapshot) {
+      const errorMessage = `ModelRun ${job.modelRunId} not found for job ${job.jobId}`;
+      await upsertProviderResult({
+        sessionId: job.topicId,
+        modelRunId: job.modelRunId,
+        provider: job.provider,
+        status: 'failed',
+        errorMessage,
+        completedAt: new Date().toISOString(),
+        lastPolledAt: new Date().toISOString()
+      });
+      logDeepResearchTransition('failed', { ...runLogContext, status: 'failed', message: errorMessage });
+      return { terminal: true as const };
+    }
+
+    const mismatch: string[] = [];
+    if (snapshot.run.session_id !== job.topicId) {
+      mismatch.push(`topic_id mismatch: run.session_id=${snapshot.run.session_id}, job.topicId=${job.topicId}`);
+    }
+    if (snapshot.run.provider !== job.provider) {
+      mismatch.push(`provider mismatch: run.provider=${snapshot.run.provider}, job.provider=${job.provider}`);
+    }
+    if (mismatch.length > 0) {
+      const errorMessage = `PAYLOAD_RUN_MISMATCH: ${mismatch.join('; ')}`;
+      await updateResearchRun({
+        runId: job.modelRunId,
+        state: 'FAILED',
+        errorMessage,
+        completed: true
+      });
+      await upsertProviderResult({
+        sessionId: job.topicId,
+        modelRunId: job.modelRunId,
+        provider: job.provider,
+        status: 'failed',
+        errorMessage,
+        completedAt: new Date().toISOString(),
+        lastPolledAt: new Date().toISOString()
+      });
+      logDeepResearchTransition('guard_failed', { ...runLogContext, status: 'failed', message: errorMessage });
+      return { terminal: true as const };
+    }
+
+    const claimed = await claimQueuedResearchRun(job.modelRunId);
+    if (!claimed) {
+      logDeepResearchTransition('duplicate_noop', {
+        ...runLogContext,
+        status: 'skipped',
+        message: 'model run already claimed or not queued'
+      });
+      return { terminal: true as const };
+    }
+
+    const nowIso = new Date().toISOString();
     await upsertProviderResult({
       sessionId: job.topicId,
       modelRunId: job.modelRunId,
       provider: job.provider,
-      status: 'failed',
-      errorMessage,
-      completedAt: new Date().toISOString(),
-      lastPolledAt: new Date().toISOString()
+      status: 'running',
+      startedAt: nowIso,
+      lastPolledAt: nowIso
     });
-    logDeepResearchTransition('failed', { ...logContext, status: 'failed', message: errorMessage });
-    return { terminal: true as const };
-  }
+    logDeepResearchTransition('running', { ...runLogContext, status: 'running' });
 
-  const mismatch: string[] = [];
-  if (snapshot.run.session_id !== job.topicId) {
-    mismatch.push(`topic_id mismatch: run.session_id=${snapshot.run.session_id}, job.topicId=${job.topicId}`);
-  }
-  if (snapshot.run.provider !== job.provider) {
-    mismatch.push(`provider mismatch: run.provider=${snapshot.run.provider}, job.provider=${job.provider}`);
-  }
-  if (mismatch.length > 0) {
-    const errorMessage = `Deep research job/model mismatch: ${mismatch.join('; ')}`;
-    await updateResearchRun({
-      runId: job.modelRunId,
-      state: 'FAILED',
-      errorMessage,
-      completed: true
-    });
+    const tickResult = await tick(job.modelRunId);
+    const completedSnapshot = await getResearchSnapshotByRunId(job.modelRunId);
+    const nextStepId = completedSnapshot ? extractStepId(completedSnapshot.run.progress_json) : null;
+
+    if (tickResult.done) {
+      const synthesized = completedSnapshot?.run?.synthesized_report_md;
+      const hasSynthesis = typeof synthesized === 'string' && synthesized.trim().length > 0;
+      const terminalFailed = tickResult.state === 'FAILED' || !hasSynthesis;
+      const terminalErrorMessage =
+        tickResult.state === 'FAILED'
+          ? completedSnapshot?.run?.error_message ?? 'Provider run failed'
+          : 'Provider completed without synthesized output';
+      await upsertProviderResult({
+        sessionId: job.topicId,
+        modelRunId: job.modelRunId,
+        provider: job.provider,
+        status: terminalFailed ? 'failed' : 'completed',
+        outputText: hasSynthesis ? synthesized : null,
+        sources: sanitizeSourcesForProviderResult(completedSnapshot?.sources ?? null),
+        errorMessage: terminalFailed ? terminalErrorMessage : null,
+        completedAt: new Date().toISOString(),
+        lastPolledAt: new Date().toISOString()
+      });
+      logDeepResearchTransition('terminal', {
+        ...runLogContext,
+        stepId: nextStepId,
+        status: terminalFailed ? 'failed' : 'completed',
+        message: terminalFailed ? terminalErrorMessage : undefined
+      });
+      return { terminal: true as const };
+    }
+
     await upsertProviderResult({
       sessionId: job.topicId,
       modelRunId: job.modelRunId,
       provider: job.provider,
-      status: 'failed',
-      errorMessage,
-      completedAt: new Date().toISOString(),
+      status: 'running',
       lastPolledAt: new Date().toISOString()
     });
-    logDeepResearchTransition('guard_failed', { ...logContext, status: 'failed', message: errorMessage });
-    return { terminal: true as const };
-  }
-
-  const claimed = await claimQueuedResearchRun(job.modelRunId);
-  if (!claimed) {
-    logDeepResearchTransition('duplicate_noop', {
+    logDeepResearchTransition('progressed', { ...runLogContext, stepId: nextStepId, status: 'running' });
+    return { terminal: false as const };
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Provider lane execution failed';
+    const nowIso = new Date().toISOString();
+    const isModelRunMismatch = errorMessage.toLowerCase().includes('model_run_id mismatch');
+    await Promise.allSettled([
+      updateResearchRun({
+        runId: job.modelRunId,
+        state: 'FAILED',
+        errorMessage,
+        completed: true
+      }),
+      upsertProviderResult({
+        sessionId: job.topicId,
+        modelRunId: job.modelRunId,
+        provider: job.provider,
+        status: 'failed',
+        errorMessage,
+        completedAt: nowIso,
+        lastPolledAt: nowIso
+      }),
+      ...(isModelRunMismatch
+        ? ([
+            upsertProviderResult({
+              sessionId: job.topicId,
+              modelRunId: null,
+              provider: job.provider,
+              status: 'failed',
+              errorMessage,
+              completedAt: nowIso,
+              lastPolledAt: nowIso
+            })
+          ] as const)
+        : [])
+    ]);
+    logDeepResearchTransition('failed', {
       ...logContext,
-      status: 'skipped',
-      message: 'model run already claimed or not queued'
+      status: 'failed',
+      message: isModelRunMismatch ? `${errorMessage} (stale row recovered)` : errorMessage
     });
     return { terminal: true as const };
   }
-
-  const nowIso = new Date().toISOString();
-  await upsertProviderResult({
-    sessionId: job.topicId,
-    modelRunId: job.modelRunId,
-    provider: job.provider,
-    status: 'running',
-    startedAt: nowIso,
-    lastPolledAt: nowIso
-  });
-  logDeepResearchTransition('running', { ...logContext, status: 'running' });
-
-  const tickResult = await tick(job.modelRunId);
-  const completedSnapshot = await getResearchSnapshotByRunId(job.modelRunId);
-  const nextStepId = completedSnapshot ? extractStepId(completedSnapshot.run.progress_json) : null;
-
-  if (tickResult.done) {
-    await upsertProviderResult({
-      sessionId: job.topicId,
-      modelRunId: job.modelRunId,
-      provider: job.provider,
-      status: tickResult.state === 'FAILED' ? 'failed' : 'completed',
-      outputText: completedSnapshot?.run?.synthesized_report_md ?? null,
-      sources: completedSnapshot?.sources ?? null,
-      errorMessage: tickResult.state === 'FAILED' ? completedSnapshot?.run?.error_message ?? 'Provider run failed' : null,
-      completedAt: new Date().toISOString(),
-      lastPolledAt: new Date().toISOString()
-    });
-    logDeepResearchTransition('terminal', {
-      ...logContext,
-      stepId: nextStepId,
-      status: tickResult.state === 'FAILED' ? 'failed' : 'completed'
-    });
-    return { terminal: true as const };
-  }
-
-  await upsertProviderResult({
-    sessionId: job.topicId,
-    modelRunId: job.modelRunId,
-    provider: job.provider,
-    status: 'running',
-    lastPolledAt: new Date().toISOString()
-  });
-  logDeepResearchTransition('progressed', { ...logContext, stepId: nextStepId, status: 'running' });
-  return { terminal: false as const };
 }
 
 async function advanceProviderFromQueue(params: {
@@ -1169,7 +1260,15 @@ export async function runProviders(
 
 export async function syncSession(
   sessionId: string,
-  opts?: { stub?: boolean; stubPdf?: boolean; stubEmail?: boolean }
+  opts?: {
+    stub?: boolean;
+    stubOpenAI?: boolean;
+    stubGemini?: boolean;
+    stubPdf?: boolean;
+    stubEmail?: boolean;
+    skipOpenAI?: boolean;
+    skipGemini?: boolean;
+  }
 ) {
   const session = await getSessionById(sessionId);
   if (!session) {
@@ -1305,35 +1404,6 @@ async function finalizeReportUnlocked(
       ? replaceLinksWithRefs(geminiResult.output_text, globalRefMap)
       : null;
 
-  const unifiedToc = [
-    '## Table of Contents',
-    '1. OpenAI Provider Report',
-    '2. Gemini Provider Report',
-    '3. Provider Comparison',
-    '4. Unified Sources'
-  ].join('\n');
-  const providerComparison = [
-    '## Provider Comparison',
-    `- OpenAI status: ${openaiResult?.status ?? 'unknown'}`,
-    `- Gemini status: ${geminiResult?.status ?? 'unknown'}`,
-    '- Agreement: Both provider reports were merged and sources were deduplicated by URL.',
-    '- Disagreement handling: Differences are preserved in separate provider sections for transparency.'
-  ].join('\n');
-  const unifiedSourcesMd = [
-    '## Unified Sources',
-    ...[...globalRefMap.entries()].map(([url, n]) => `[${n}] ${url}`)
-  ].join('\n');
-  const unifiedReport = [
-    '# Aggregated Deep Research Report',
-    unifiedToc,
-    '## OpenAI Provider Report',
-    openaiTextWithRefs || 'No OpenAI report available.',
-    '## Gemini Provider Report',
-    geminiTextWithRefs || 'No Gemini report available.',
-    providerComparison,
-    unifiedSourcesMd
-  ].join('\n\n');
-
   const hasResearchMaterial = Boolean(
     (runReportOpenai && runReportOpenai.trim()) ||
       (runReportGemini && runReportGemini.trim()) ||
@@ -1367,17 +1437,18 @@ async function finalizeReportUnlocked(
     return;
   }
 
-  const includeRefs = settings.report_include_refs_in_summary;
+  const includeRefs = false;
   type SummaryRef = { n: number; title?: string; url: string; accessedAt?: string };
   const summarize = async (provider: 'OpenAI' | 'Gemini' | 'Combined', text: string, refs: SummaryRef[]) => {
+    const cleanText = stripSourcesSections(text);
     if (settings.summarize_provider === 'gemini') {
       return summarizeForReportGemini(
-        { provider, researchText: text, references: refs },
+        { provider, researchText: cleanText, references: refs },
         { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000, includeRefs }
       );
     }
     return summarizeForReport(
-      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: text, references: refs },
+      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: cleanText, references: refs },
       { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000, includeRefs }
     );
   };
@@ -1385,10 +1456,7 @@ async function finalizeReportUnlocked(
   let finalOpenaiSummary = 'No OpenAI result available.';
   let finalGeminiSummary = 'No Gemini result available.';
 
-  if (runReportOpenai || runReportGemini) {
-    finalOpenaiSummary = unifiedReport;
-    finalGeminiSummary = '';
-  } else if (settings.report_summary_mode === 'one') {
+  if (settings.report_summary_mode === 'one') {
     const combinedText = [openaiTextWithRefs, geminiTextWithRefs].filter(Boolean).join('\n\n');
     const combinedRefs = [...openaiRefs, ...geminiRefs];
     finalOpenaiSummary = combinedText
@@ -1481,11 +1549,16 @@ async function finalizeReportUnlocked(
       summary: report.summary_text || summary,
       pdfBuffer
     }, { stub: opts?.stubEmail ?? opts?.stub });
-    await updateReportEmail({
-      reportId: claimedReportId,
-      emailStatus: 'sent',
-      sentAt: new Date().toISOString()
-    });
+    try {
+      await updateReportEmail({
+        reportId: claimedReportId,
+        emailStatus: 'sent',
+        sentAt: new Date().toISOString()
+      });
+    } catch (markSentError) {
+      // Do not mark failed after successful delivery; avoids duplicate resend on DB hiccups.
+      console.error('Email delivered but failed to mark report as sent', markSentError);
+    }
   } catch (error) {
     console.error('Email send failed', error);
     await updateReportEmail({

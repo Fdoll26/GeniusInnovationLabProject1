@@ -41,7 +41,7 @@ CREATE TABLE IF NOT EXISTS refinement_questions (
 CREATE TABLE IF NOT EXISTS provider_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   session_id uuid NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
-  model_run_id uuid REFERENCES research_runs(id) ON DELETE SET NULL,
+  model_run_id uuid,
   provider text NOT NULL,
   status text NOT NULL,
   output_text text,
@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS research_runs (
   CONSTRAINT research_runs_provider_check CHECK (provider IN ('openai','gemini')),
   CONSTRAINT research_runs_mode_check CHECK (mode IN ('native','custom')),
   CONSTRAINT research_runs_depth_check CHECK (depth IN ('light','standard','deep')),
+  CONSTRAINT research_runs_id_session_provider_key UNIQUE (id, session_id, provider),
   CONSTRAINT research_runs_session_provider_attempt_key UNIQUE (session_id, provider, attempt)
 );
 
@@ -258,7 +259,7 @@ CREATE TABLE IF NOT EXISTS user_settings (
 
 -- Backfill updates for existing DBs (safe if already applied)
 ALTER TABLE provider_results
-  ADD COLUMN IF NOT EXISTS model_run_id uuid REFERENCES research_runs(id) ON DELETE SET NULL,
+  ADD COLUMN IF NOT EXISTS model_run_id uuid,
   ADD COLUMN IF NOT EXISTS external_id text,
   ADD COLUMN IF NOT EXISTS external_status text,
   ADD COLUMN IF NOT EXISTS last_polled_at timestamptz,
@@ -296,6 +297,51 @@ BEGIN
 END
 $$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'research_runs_id_session_provider_key'
+      AND conrelid = 'research_runs'::regclass
+  ) THEN
+    ALTER TABLE research_runs
+      ADD CONSTRAINT research_runs_id_session_provider_key UNIQUE (id, session_id, provider);
+  END IF;
+END
+$$;
+
+UPDATE provider_results pr
+SET model_run_id = NULL
+WHERE pr.model_run_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1
+    FROM research_runs rr
+    WHERE rr.id = pr.model_run_id
+      AND rr.session_id = pr.session_id
+      AND rr.provider = pr.provider
+  );
+
+ALTER TABLE provider_results
+  DROP CONSTRAINT IF EXISTS provider_results_model_run_id_fkey;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'provider_results_model_run_scope_fkey'
+      AND conrelid = 'provider_results'::regclass
+  ) THEN
+    ALTER TABLE provider_results
+      ADD CONSTRAINT provider_results_model_run_scope_fkey
+      FOREIGN KEY (model_run_id, session_id, provider)
+      REFERENCES research_runs (id, session_id, provider)
+      ON DELETE SET NULL;
+  END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS research_runs_session_provider_idx
   ON research_runs (session_id, provider);
 
@@ -304,6 +350,9 @@ CREATE INDEX IF NOT EXISTS research_runs_state_provider_idx
 
 CREATE INDEX IF NOT EXISTS research_steps_run_id_idx
   ON research_steps (run_id);
+
+CREATE INDEX IF NOT EXISTS provider_results_session_provider_model_run_idx
+  ON provider_results (session_id, provider, model_run_id);
 
 ALTER TABLE user_settings
   ADD COLUMN IF NOT EXISTS research_provider text NOT NULL DEFAULT 'openai',
