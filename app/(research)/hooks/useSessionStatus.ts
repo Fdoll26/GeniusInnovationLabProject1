@@ -73,10 +73,7 @@ export function useSessionStatus(sessionId: string | null) {
     };
 
     fetchStatus();
-    const isTerminalState = (state: string | undefined) =>
-      state === 'completed' || state === 'partial' || state === 'failed';
-    const shouldPoll = !isTerminalState(status?.state);
-    const interval = shouldPoll ? setInterval(fetchStatus, 5000) : null;
+    const interval = setInterval(fetchStatus, 5000);
     const onFocus = () => fetchStatus();
     const onVis = () => {
       if (document.visibilityState === 'visible') {
@@ -87,11 +84,11 @@ export function useSessionStatus(sessionId: string | null) {
     document.addEventListener('visibilitychange', onVis);
     return () => {
       active = false;
-      if (interval) clearInterval(interval);
+      clearInterval(interval);
       window.removeEventListener('focus', onFocus);
       document.removeEventListener('visibilitychange', onVis);
     };
-  }, [sessionId, status?.state]);
+  }, [sessionId]);
 
   return { status, error };
 }

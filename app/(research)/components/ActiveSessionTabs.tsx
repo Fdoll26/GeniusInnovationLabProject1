@@ -63,6 +63,17 @@ function Tab({
   );
 }
 
+function CompletionWatcher({ sessionId, onCompleted }: { sessionId: string; onCompleted: () => void }) {
+  const { status } = useSessionStatus(sessionId);
+  useEffect(() => {
+    if (!status?.state) return;
+    if (status.state === 'completed' || status.state === 'partial') {
+      onCompleted();
+    }
+  }, [status?.state, onCompleted]);
+  return null;
+}
+
 export default function ActiveSessionTabs({
   sessions,
   activeId,
@@ -91,6 +102,9 @@ export default function ActiveSessionTabs({
 
   return (
     <>
+      {sessions.map((s) => (
+        <CompletionWatcher key={`watch-${s.id}`} sessionId={s.id} onCompleted={() => handleCompleted(s.id)} />
+      ))}
       {sessions.length >= 2 ? (
         <div className="session-tabs" aria-label="Active sessions">
           {sessions.map((s) => (
