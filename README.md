@@ -11,6 +11,7 @@ Next.js app that orchestrates “deep research” across OpenAI + Gemini, stores
 - Tests (Vitest): `tests/`
 
 For a deeper technical walkthrough, see `docs/APP_GUIDE.md`.
+For deep research orchestrator details, see `docs/research.md`.
 
 ## Setup (Local)
 

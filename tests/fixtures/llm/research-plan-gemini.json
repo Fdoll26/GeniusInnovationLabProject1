@@ -1,0 +1,48 @@
+{
+  "version": "1.0",
+  "refined_topic": "What are the 2026 EV battery trends?",
+  "assumptions": [
+    "Scope includes chemistry mix, cost trajectory, and supply chain outlook."
+  ],
+  "total_budget": {
+    "max_steps": 3,
+    "max_sources": 15,
+    "max_tokens": 4800
+  },
+  "steps": [
+    {
+      "step_index": 0,
+      "step_type": "DEVELOP_RESEARCH_PLAN",
+      "title": "Plan",
+      "objective": "Define the investigation boundaries and decision questions.",
+      "target_source_types": ["industry_report", "government"],
+      "search_query_pack": ["EV battery trend drivers 2026"],
+      "budgets": { "max_sources": 4, "max_tokens": 1200, "max_minutes": 8 },
+      "deliverables": ["Research plan"],
+      "done_definition": ["Scope and assumptions clear"]
+    },
+    {
+      "step_index": 1,
+      "step_type": "DISCOVER_SOURCES_WITH_PLAN",
+      "title": "Discover",
+      "objective": "Find high-signal sources for each trend category.",
+      "target_source_types": ["government", "industry_report", "news"],
+      "search_query_pack": ["EV battery market outlook 2026", "battery chemistry market share 2026"],
+      "budgets": { "max_sources": 7, "max_tokens": 1800, "max_minutes": 12 },
+      "deliverables": ["Candidate source inventory"],
+      "done_definition": ["Coverage across cost chemistry supply chain"]
+    },
+    {
+      "step_index": 2,
+      "step_type": "SECTION_SYNTHESIS",
+      "title": "Synthesize",
+      "objective": "Assemble final narrative with citations and key uncertainties.",
+      "target_source_types": ["reference", "government"],
+      "search_query_pack": ["EV battery trends 2026 synthesis"],
+      "budgets": { "max_sources": 4, "max_tokens": 1800, "max_minutes": 12 },
+      "deliverables": ["Final markdown synthesis"],
+      "done_definition": ["Claims cite sources", "Unknowns explicitly listed"]
+    }
+  ],
+  "deliverables": ["Concise source-backed trend summary"]
+}

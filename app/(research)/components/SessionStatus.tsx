@@ -1,9 +1,11 @@
 'use client';
 
+import { useState } from 'react';
 import { useSessionStatus } from '../hooks/useSessionStatus';
 
 export default function SessionStatus({ sessionId }: { sessionId: string | null }) {
   const { status, error } = useSessionStatus(sessionId);
+  const [expandedByProvider, setExpandedByProvider] = useState<Record<string, boolean>>({});
 
   if (!sessionId) {
     return <div className="card">No active session.</div>;
@@ -42,6 +44,71 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
     const s = providerStatus ?? 'pending';
     const clean = s.replace(/_/g, ' ');
     return `${provider}: ${clean}`;
+  };
+
+  const researchProviders = status.research?.providers ?? [];
+  const providerProgressByName = new Map(researchProviders.map((p) => [p.provider, p]));
+  const isExpanded = (provider: 'openai' | 'gemini') => Boolean(expandedByProvider[provider]);
+  const toggleExpanded = (provider: 'openai' | 'gemini') => {
+    setExpandedByProvider((prev) => ({ ...prev, [provider]: !prev[provider] }));
+  };
+
+  type ProviderStatusRow = {
+    provider: string;
+    status: string;
+    startedAt: string | null;
+    completedAt: string | null;
+    errorMessage: string | null;
+  };
+
+  const renderProviderBlock = (provider: 'openai' | 'gemini', providerResult?: ProviderStatusRow) => {
+    const run = providerProgressByName.get(provider);
+    const providerName = provider === 'openai' ? 'OpenAI' : 'Gemini';
+    const steps = [...(run?.steps ?? [])].sort((a, b) => a.stepIndex - b.stepIndex);
+    const canToggle = steps.length > 0;
+    const expanded = isExpanded(provider);
+
+    return (
+      <div className="stack" key={provider}>
+        <div className="provider-row">
+          {providerResult?.status === 'running' ? <span className="spinner" aria-hidden /> : null}
+          <span>{providerLabel(providerName, providerResult?.status)}</span>
+        </div>
+        {providerResult?.errorMessage ? <small className="muted">Error: {providerResult.errorMessage}</small> : null}
+        {providerResult?.startedAt ? <small className="muted">Started: {new Date(providerResult.startedAt).toLocaleString()}</small> : null}
+        {providerResult?.completedAt ? <small className="muted">Completed: {new Date(providerResult.completedAt).toLocaleString()}</small> : null}
+        {run?.progress?.stepLabel ? (
+          <small className="muted">
+            {`${providerName}: ${run.progress.stepLabel} (${Math.min(
+              run.progress.stepNumber ?? 0,
+              run.progress.totalSteps ?? 8
+            )}/${run.progress.totalSteps ?? 8})`}
+          </small>
+        ) : null}
+        {canToggle ? (
+          <button type="button" className="button-secondary provider-toggle" onClick={() => toggleExpanded(provider)}>
+            {expanded ? 'Hide' : 'Expand'}
+          </button>
+        ) : null}
+        {expanded ? (
+          <div className="step-list">
+            {steps.map((step) => (
+              <div
+                key={step.id}
+                className={`step ${step.status === 'running' ? 'is-active' : ''} ${step.status === 'done' ? 'is-done' : ''} ${
+                  step.status === 'failed' ? 'is-failed' : ''
+                }`}
+              >
+                <span className="step__dot" aria-hidden />
+                <span>
+                  #{step.stepIndex + 1} {step.stepType.replace(/_/g, ' ')} - {step.status}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    );
   };
 
   return (
@@ -89,37 +156,6 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
             </div>
           </div>
 
-          <div className="stack">
-            <strong>Providers</strong>
-            <div className="stack">
-              <div className="provider-row">
-                {openai?.status === 'running' ? <span className="spinner" aria-hidden /> : null}
-                <span>{providerLabel('OpenAI', openai?.status)}</span>
-              </div>
-              {openai?.errorMessage ? <small className="muted">Error: {openai.errorMessage}</small> : null}
-              {openai?.startedAt ? (
-                <small className="muted">Started: {new Date(openai.startedAt).toLocaleString()}</small>
-              ) : null}
-              {openai?.completedAt ? (
-                <small className="muted">Completed: {new Date(openai.completedAt).toLocaleString()}</small>
-              ) : null}
-            </div>
-
-            <div className="stack">
-              <div className="provider-row">
-                {gemini?.status === 'running' ? <span className="spinner" aria-hidden /> : null}
-                <span>{providerLabel('Gemini', gemini?.status)}</span>
-              </div>
-              {gemini?.errorMessage ? <small className="muted">Error: {gemini.errorMessage}</small> : null}
-              {gemini?.startedAt ? (
-                <small className="muted">Started: {new Date(gemini.startedAt).toLocaleString()}</small>
-              ) : null}
-              {gemini?.completedAt ? (
-                <small className="muted">Completed: {new Date(gemini.completedAt).toLocaleString()}</small>
-              ) : null}
-            </div>
-          </div>
-
           {status.refinedAt ? (
             <small className="muted">Refined: {new Date(status.refinedAt).toLocaleString()}</small>
           ) : null}
@@ -128,6 +164,12 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
           ) : null}
         </div>
       </details>
+
+      <div className="stack">
+        <strong>Providers</strong>
+        {renderProviderBlock('openai', openai)}
+        {renderProviderBlock('gemini', gemini)}
+      </div>
     </div>
   );
 }

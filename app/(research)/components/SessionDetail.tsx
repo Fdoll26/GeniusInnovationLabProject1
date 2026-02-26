@@ -48,6 +48,35 @@ type SessionDetail = {
     sent_at?: string | null;
     email_error?: string | null;
   } | null;
+  research?: {
+    run: {
+      id: string;
+      state: string;
+      provider: string;
+      mode: string;
+      depth: string;
+      current_step_index: number;
+      max_steps: number;
+      synthesized_report_md?: string | null;
+    };
+    steps: Array<{
+      id: string;
+      step_index: number;
+      step_type: string;
+      status: string;
+      step_goal?: string | null;
+      output_excerpt?: string | null;
+      raw_output?: string | null;
+      completed_at?: string | null;
+      error_message?: string | null;
+    }>;
+    sources: Array<{
+      source_id: string;
+      url: string;
+      title?: string | null;
+      reliability_tags?: string[];
+    }>;
+  } | null;
 };
 
 export default function SessionDetail({
@@ -285,6 +314,53 @@ export default function SessionDetail({
             </div>
           ))}
         </div>
+        {detail.research?.run ? (
+          <div className="stack">
+            <strong>Research artifacts</strong>
+            <small>
+              Run state: {detail.research.run.state} | Provider/mode: {detail.research.run.provider}/{detail.research.run.mode} | Depth:{' '}
+              {detail.research.run.depth}
+            </small>
+            <small>
+              Progress: {Math.min(detail.research.run.current_step_index, detail.research.run.max_steps)}/{detail.research.run.max_steps} steps
+            </small>
+            {detail.research.steps.length > 0 ? (
+              <small>
+                Current step:{' '}
+                {detail.research.steps
+                  .slice()
+                  .sort((a, b) => b.step_index - a.step_index)[0]
+                  ?.step_type.replace(/_/g, ' ')}
+              </small>
+            ) : null}
+            <details className="details">
+              <summary className="details__summary">Step artifacts</summary>
+              <div className="details__body stack">
+                {detail.research.steps.map((step) => (
+                  <div key={step.id}>
+                    <strong>
+                      #{step.step_index + 1} {step.step_type} - {step.status}
+                    </strong>
+                    {step.step_goal ? <div>{step.step_goal}</div> : null}
+                    {step.output_excerpt ? <small className="muted">{step.output_excerpt}</small> : null}
+                    {step.raw_output ? <pre className="pre">{step.raw_output}</pre> : null}
+                    {step.error_message ? <small className="muted">Error: {step.error_message}</small> : null}
+                  </div>
+                ))}
+              </div>
+            </details>
+            <details className="details">
+              <summary className="details__summary">Sources ({detail.research.sources.length})</summary>
+              <div className="details__body stack">
+                {detail.research.sources.map((source) => (
+                  <small key={source.source_id}>
+                    {source.title || source.url} {source.reliability_tags?.length ? `(${source.reliability_tags.join(', ')})` : ''}
+                  </small>
+                ))}
+              </div>
+            </details>
+          </div>
+        ) : null}
         <div className="stack">
           <strong>Email delivery</strong>
           <p>

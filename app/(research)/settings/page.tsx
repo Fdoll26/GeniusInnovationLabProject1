@@ -13,6 +13,13 @@ type Settings = {
   report_summary_mode: 'one' | 'two';
   report_include_refs_in_summary: boolean;
   theme: 'light' | 'dark';
+  research_provider: 'openai' | 'gemini';
+  research_mode: 'native' | 'custom';
+  research_depth: 'light' | 'standard' | 'deep';
+  research_max_steps: number;
+  research_target_sources_per_step: number;
+  research_max_total_sources: number;
+  research_max_tokens_per_step: number;
 };
 
 const defaultSettings: Settings = {
@@ -24,7 +31,14 @@ const defaultSettings: Settings = {
   reasoning_level: 'low',
   report_summary_mode: 'two',
   report_include_refs_in_summary: true,
-  theme: 'light'
+  theme: 'light',
+  research_provider: 'openai',
+  research_mode: 'custom',
+  research_depth: 'standard',
+  research_max_steps: 8,
+  research_target_sources_per_step: 5,
+  research_max_total_sources: 40,
+  research_max_tokens_per_step: 1800
 };
 
 export default function SettingsPage() {
@@ -130,11 +144,95 @@ export default function SettingsPage() {
 
           <div className="two-col two-col--equal">
             <label className="stack">
-              <span>Max sources (1–20)</span>
+              <span>Research provider</span>
+              <select
+                value={settings.research_provider}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_provider: event.target.value as Settings['research_provider'] }))}
+              >
+                <option value="openai">OpenAI</option>
+                <option value="gemini">Gemini</option>
+              </select>
+            </label>
+
+            <label className="stack">
+              <span>Research mode</span>
+              <select
+                value={settings.research_mode}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_mode: event.target.value as Settings['research_mode'] }))}
+              >
+                <option value="custom">Custom stepwise</option>
+                <option value="native">Native deep research</option>
+              </select>
+            </label>
+          </div>
+
+          <div className="two-col two-col--equal">
+            <label className="stack">
+              <span>Research depth</span>
+              <select
+                value={settings.research_depth}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_depth: event.target.value as Settings['research_depth'] }))}
+              >
+                <option value="light">Light</option>
+                <option value="standard">Standard</option>
+                <option value="deep">Deep</option>
+              </select>
+            </label>
+
+            <label className="stack">
+              <span>Research max steps (3–20)</span>
+              <input
+                type="number"
+                min={3}
+                max={20}
+                value={settings.research_max_steps}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_max_steps: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+
+          <div className="two-col two-col--equal">
+            <label className="stack">
+              <span>Sources per step (1–20)</span>
               <input
                 type="number"
                 min={1}
                 max={20}
+                value={settings.research_target_sources_per_step}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_target_sources_per_step: Number(event.target.value) }))}
+              />
+            </label>
+
+            <label className="stack">
+              <span>Max total sources (5–300)</span>
+              <input
+                type="number"
+                min={5}
+                max={300}
+                value={settings.research_max_total_sources}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_max_total_sources: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+
+          <div className="two-col two-col--equal">
+            <label className="stack">
+              <span>Step output token cap (300–8000)</span>
+              <input
+                type="number"
+                min={300}
+                max={8000}
+                value={settings.research_max_tokens_per_step}
+                onChange={(event) => setSettings((prev) => ({ ...prev, research_max_tokens_per_step: Number(event.target.value) }))}
+              />
+            </label>
+
+            <label className="stack">
+              <span>Max sources (1–50)</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
                 value={settings.max_sources}
                 onChange={(event) => setSettings((prev) => ({ ...prev, max_sources: Number(event.target.value) }))}
               />

@@ -553,8 +553,60 @@ export function getResponseOutputText(data: unknown): string {
   return extractOutputText(data);
 }
 
+export function getResponsePrimaryMessageContent(data: unknown): { text: string; annotations: unknown } | null {
+  const typed = data as {
+    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+  };
+  const firstContent = typed?.output?.[0]?.content?.[0];
+  if (!firstContent || typeof firstContent.text !== 'string') {
+    return null;
+  }
+  return {
+    text: firstContent.text,
+    annotations: firstContent.annotations ?? null
+  };
+}
+
 export function getResponseSources(data: unknown): unknown {
-  return (data as { sources?: unknown }).sources;
+  const topLevel = (data as { sources?: unknown }).sources ?? null;
+  const consulted = getResponseWebSearchCallSources(data);
+  if (consulted.length === 0) return topLevel;
+  return {
+    response_sources: topLevel,
+    web_search_call_sources: consulted
+  };
+}
+
+export function getResponseWebSearchCallSources(data: unknown): Array<{ url: string; title?: string | null }> {
+  const out: Array<{ url: string; title?: string | null }> = [];
+  const seen = new Set<string>();
+  const output = (data as { output?: unknown[] })?.output;
+  if (!Array.isArray(output)) return out;
+
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (rec.type !== 'web_search_call') continue;
+    const action = rec.action;
+    if (!action || typeof action !== 'object') continue;
+    const sources = (action as Record<string, unknown>).sources;
+    if (!Array.isArray(sources)) continue;
+    for (const source of sources) {
+      if (!source || typeof source !== 'object') continue;
+      const src = source as Record<string, unknown>;
+      const rawUrl =
+        (typeof src.url === 'string' && src.url) ||
+        (typeof src.uri === 'string' && src.uri) ||
+        (typeof src.href === 'string' && src.href) ||
+        null;
+      if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) continue;
+      const url = rawUrl.replace(/[.,;:!?]+$/, '');
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push({ url, title: typeof src.title === 'string' ? src.title : null });
+    }
+  }
+  return out;
 }
 
 function parseRefinementOutput(text: string): { questions: string[] } {
@@ -654,13 +706,19 @@ export async function runResearch(
   }
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources)))
+      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
       ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
       : null;
+  const depthText =
+    'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
   const messageInput = [
+    {
+      role: 'system',
+      content: [{ type: 'input_text', text: depthText }]
+    },
     ...(sourceBudgetText
       ? ([
           {
@@ -674,7 +732,9 @@ export async function runResearch(
       content: [{ type: 'input_text', text: refinedPrompt }]
     }
   ] as const;
-  const legacyInput = sourceBudgetText ? `${sourceBudgetText}\n\n${refinedPrompt}` : refinedPrompt;
+  const legacyInput = sourceBudgetText
+    ? `${depthText}\n${sourceBudgetText}\n\n${refinedPrompt}`
+    : `${depthText}\n\n${refinedPrompt}`;
 
   const mappedEffort = (() => {
     if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
@@ -768,6 +828,7 @@ export async function startResearchJob(
     timeoutMs?: number;
     maxSources?: number;
     reasoningLevel?: ReasoningLevel;
+    model?: string;
   }
 ): Promise<{ responseId: string | null; status: string | null; data: unknown }> {
   if (opts?.stub) {
@@ -776,7 +837,7 @@ export async function startResearchJob(
 
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(20, Math.trunc(opts.maxSources)))
+      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
@@ -809,7 +870,7 @@ export async function startResearchJob(
   })();
   const reasoning = mappedEffort ? { effort: mappedEffort } : undefined;
 
-  const body = buildDeepResearchBody(legacyInput, reasoning);
+  const body = buildDeepResearchBody(legacyInput, reasoning, opts?.model);
   try {
     const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
     let started: { responseId: string | null; status: string | null; data: unknown };
@@ -817,7 +878,8 @@ export async function startResearchJob(
       try {
         return await startDeepResearch(messageInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -826,7 +888,8 @@ export async function startResearchJob(
         }
         return await startDeepResearch(legacyInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       }
     };
@@ -859,12 +922,17 @@ export async function startResearchJob(
   }
 }
 
-function buildDeepResearchBody(input: unknown, reasoning?: { effort: ReasoningEffort }) {
+function buildDeepResearchBody(
+  input: unknown,
+  reasoning?: { effort: ReasoningEffort },
+  modelOverride?: string
+) {
   return {
-    model: deepResearchModel,
+    model: modelOverride || deepResearchModel,
     input,
     tools: [{ type: 'web_search_preview' }],
     tool_choice: 'auto',
+    include: ['web_search_call.action.sources'],
     max_tool_calls: maxToolCalls,
     ...(reasoning ? { reasoning } : {})
   } as const;
@@ -872,11 +940,11 @@ function buildDeepResearchBody(input: unknown, reasoning?: { effort: ReasoningEf
 
 export async function startDeepResearch(
   input: unknown,
-  opts?: { timeoutMs?: number; reasoning?: { effort: ReasoningEffort } }
+  opts?: { timeoutMs?: number; reasoning?: { effort: ReasoningEffort }; model?: string }
 ): Promise<{ responseId: string | null; status: string | null; data: unknown }> {
   const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
   const createTimeoutMs = Math.min(60_000, timeoutBudgetMs);
-  const body = buildDeepResearchBody(input, opts?.reasoning);
+  const body = buildDeepResearchBody(input, opts?.reasoning, opts?.model);
   const createBody = { ...body, background: true } as Record<string, unknown>;
   const data = await withDeepResearchSlot(async () =>
     request('/responses', createBody, {
@@ -1010,4 +1078,62 @@ export async function summarizeForReport(
   );
 
   return extractOutputText(data).trim();
+}
+
+export async function runOpenAiReasoningStep(params: {
+  prompt: string;
+  maxOutputTokens: number;
+  model?: string;
+  previousResponseId?: string | null;
+  timeoutMs?: number;
+  useWebSearch?: boolean;
+  structuredOutput?: {
+    schemaName: string;
+    jsonSchema: Record<string, unknown>;
+  };
+}): Promise<{
+  text: string;
+  responseId: string | null;
+  usage?: unknown;
+  primaryContent?: { text: string; annotations: unknown };
+  sources?: unknown;
+}> {
+  const body: Record<string, unknown> = {
+    model: params.model || refinerModel,
+    input: params.prompt,
+    max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
+    ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})
+  };
+  if (params.structuredOutput) {
+    body.text = {
+      format: {
+        type: 'json_schema',
+        name: params.structuredOutput.schemaName,
+        schema: params.structuredOutput.jsonSchema,
+        strict: true
+      }
+    };
+  }
+  if (params.useWebSearch ?? true) {
+    body.tools = [{ type: 'web_search_preview' }];
+    body.tool_choice = 'auto';
+    body.include = ['web_search_call.action.sources'];
+  }
+
+  const data = await request(
+    '/responses',
+    body,
+    params.timeoutMs
+      ? { requestTimeoutMs: params.timeoutMs, headersTimeoutMs: params.timeoutMs, bodyTimeoutMs: params.timeoutMs }
+      : undefined
+  );
+  const typed = data as { id?: string; usage?: unknown };
+  const primary = getResponsePrimaryMessageContent(data);
+  return {
+    text: (primary?.text ?? extractOutputText(data)).trim(),
+    responseId: typeof typed.id === 'string' ? typed.id : null,
+    usage: typed.usage,
+    sources: getResponseSources(data),
+    ...(primary ? { primaryContent: primary } : {})
+  };
 }

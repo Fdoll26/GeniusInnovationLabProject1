@@ -3,6 +3,7 @@ import { query } from './db';
 export type ProviderResultRecord = {
   id: string;
   session_id: string;
+  model_run_id?: string | null;
   provider: string;
   status: string;
   output_text: string | null;
@@ -17,8 +18,28 @@ export type ProviderResultRecord = {
   last_polled_at?: string | null;
 };
 
+function normalizeJsonValue(value: unknown): unknown | null {
+  if (value == null) return null;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return { raw: value };
+    }
+  }
+  return value;
+}
+
+function jsonOrNull(value: unknown): string | null {
+  const normalized = normalizeJsonValue(value);
+  return normalized == null ? null : JSON.stringify(normalized);
+}
+
 export async function upsertProviderResult(params: {
   sessionId: string;
+  modelRunId?: string | null;
   provider: 'openai' | 'gemini';
   status: string;
   outputText?: string | null;
@@ -32,13 +53,15 @@ export async function upsertProviderResult(params: {
   externalStatus?: string | null;
   lastPolledAt?: string | null;
 }) {
+  const normalizedSources = jsonOrNull(params.sources);
   try {
-    await query(
+    const rows = await query<{ id: string }>(
       `INSERT INTO provider_results
-       (session_id, provider, status, output_text, sources_json, error_code, error_message, queued_at, started_at, completed_at, external_id, external_status, last_polled_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+       (session_id, model_run_id, provider, status, output_text, sources_json, error_code, error_message, queued_at, started_at, completed_at, external_id, external_status, last_polled_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
        ON CONFLICT (session_id, provider)
        DO UPDATE SET
+         model_run_id = COALESCE(EXCLUDED.model_run_id, provider_results.model_run_id),
          status = EXCLUDED.status,
          output_text = COALESCE(EXCLUDED.output_text, provider_results.output_text),
          sources_json = COALESCE(EXCLUDED.sources_json, provider_results.sources_json),
@@ -49,13 +72,22 @@ export async function upsertProviderResult(params: {
          completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at),
          external_id = COALESCE(EXCLUDED.external_id, provider_results.external_id),
          external_status = COALESCE(EXCLUDED.external_status, provider_results.external_status),
-         last_polled_at = COALESCE(EXCLUDED.last_polled_at, provider_results.last_polled_at)`,
+         last_polled_at = COALESCE(EXCLUDED.last_polled_at, provider_results.last_polled_at)
+       WHERE EXCLUDED.model_run_id IS NULL
+         OR provider_results.model_run_id IS NULL
+         OR provider_results.model_run_id = EXCLUDED.model_run_id
+         OR provider_results.status IN ('completed', 'failed', 'skipped', 'stubbed')
+         OR provider_results.completed_at IS NOT NULL
+         OR (EXCLUDED.status = 'queued' AND provider_results.status <> 'running')
+         OR (EXCLUDED.status = 'running' AND provider_results.status = 'queued')
+       RETURNING id`,
       [
         params.sessionId,
+        params.modelRunId ?? null,
         params.provider,
         params.status,
         params.outputText ?? null,
-        params.sources ?? null,
+        normalizedSources,
         params.errorCode ?? null,
         params.errorMessage ?? null,
         params.queuedAt ?? null,
@@ -66,10 +98,18 @@ export async function upsertProviderResult(params: {
         params.lastPolledAt ?? null
       ]
     );
+    if (!rows[0]) {
+      throw new Error(
+        `Provider result write blocked: model_run_id mismatch for ${params.provider} session ${params.sessionId}`
+      );
+    }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     const lower = msg.toLowerCase();
-    if (lower.includes('external_id') && lower.includes('does not exist')) {
+    if (
+      (lower.includes('external_id') && lower.includes('does not exist')) ||
+      (lower.includes('model_run_id') && lower.includes('does not exist'))
+    ) {
       await query(
         `INSERT INTO provider_results
          (session_id, provider, status, output_text, sources_json, error_code, error_message, queued_at, started_at, completed_at)
@@ -89,7 +129,7 @@ export async function upsertProviderResult(params: {
           params.provider,
           params.status,
           params.outputText ?? null,
-          params.sources ?? null,
+          normalizedSources,
           params.errorCode ?? null,
           params.errorMessage ?? null,
           params.queuedAt ?? null,

@@ -17,7 +17,8 @@ export async function createQuestions(params: {
   const inserts = params.questions.map((question, index) =>
     query(
       `INSERT INTO refinement_questions (session_id, sequence, question_text)
-       VALUES ($1, $2, $3)`,
+       VALUES ($1, $2, $3)
+       ON CONFLICT (session_id, sequence) DO NOTHING`,
       [params.sessionId, index + 1, question]
     )
   );

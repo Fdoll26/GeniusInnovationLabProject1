@@ -1,4 +1,4 @@
-import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, PDFName, PDFString, StandardFonts, rgb } from 'pdf-lib';
 
 export type ReportInput = {
   sessionId: string;
@@ -219,6 +219,25 @@ export async function buildPdfReport(
     }
   };
 
+  const addLinkAnnotation = (url: string, x: number, yPos: number, width: number, height: number) => {
+    if (!url || width <= 0 || height <= 0) {
+      return;
+    }
+    const link = pdfDoc.context.obj({
+      Type: PDFName.of('Annot'),
+      Subtype: PDFName.of('Link'),
+      Rect: [x, yPos, x + width, yPos + height],
+      Border: [0, 0, 0],
+      A: {
+        Type: PDFName.of('Action'),
+        S: PDFName.of('URI'),
+        URI: PDFString.of(url)
+      }
+    });
+    const linkRef = pdfDoc.context.register(link);
+    page.node.addAnnot(linkRef);
+  };
+
   const writeLine = (
     text: string,
     options?: { bold?: boolean; size?: number; color?: ReturnType<typeof rgb> }
@@ -310,6 +329,110 @@ export async function buildPdfReport(
         writeLine(line, { bold: options?.bold, size: fontSize, color: options?.color });
       }
     }
+  };
+
+  const writeLinkedParagraph = (
+    segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }>,
+    options?: { bold?: boolean; size?: number; color?: ReturnType<typeof rgb> }
+  ) => {
+    const fontSize = options?.size ?? bodyFontSize;
+    const activeFont = options?.bold ? fontBold : font;
+    const lineAdvance = Math.max(lineHeight, Math.round(fontSize * 1.35));
+
+    const tokens: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [];
+    for (const segment of segments) {
+      if (!segment.text) {
+        continue;
+      }
+      const safeText = sanitizePdfText(segment.text);
+      const parts = safeText.match(/\S+|\s+/g) ?? [];
+      for (const part of parts) {
+        tokens.push({ text: part, url: segment.url, color: segment.color });
+      }
+    }
+
+    const splitLongToken = (token: string) => {
+      const parts: string[] = [];
+      let remaining = token;
+      while (remaining.length > 0) {
+        let lo = 1;
+        let hi = remaining.length;
+        let best = 1;
+        while (lo <= hi) {
+          const mid = Math.floor((lo + hi) / 2);
+          const chunk = remaining.slice(0, mid);
+          const w = activeFont.widthOfTextAtSize(chunk, fontSize);
+          if (w <= maxWidth) {
+            best = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        parts.push(remaining.slice(0, best));
+        remaining = remaining.slice(best);
+      }
+      return parts;
+    };
+
+    let lineTokens: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [];
+    let lineWidth = 0;
+
+    const flushLine = () => {
+      if (lineTokens.length === 0) {
+        return;
+      }
+      ensureSpace(lineAdvance);
+      let x = margin;
+      for (const token of lineTokens) {
+        if (!token.text) continue;
+        const tokenWidth = activeFont.widthOfTextAtSize(token.text, fontSize);
+        const color = token.color ?? options?.color ?? ink;
+        page.drawText(token.text, { x, y, size: fontSize, font: activeFont, color });
+        if (token.url && tokenWidth > 0) {
+          addLinkAnnotation(token.url, x, y - 2, tokenWidth, fontSize + 4);
+        }
+        x += tokenWidth;
+      }
+      y -= lineAdvance;
+      lineTokens = [];
+      lineWidth = 0;
+    };
+
+    for (const token of tokens) {
+      if (!token.text) continue;
+      const isWhitespace = /^\s+$/.test(token.text);
+      const tokenWidth = activeFont.widthOfTextAtSize(token.text, fontSize);
+
+      if (tokenWidth > maxWidth) {
+        if (lineTokens.length > 0) {
+          flushLine();
+        }
+        const chunks = splitLongToken(token.text);
+        for (const chunk of chunks) {
+          lineTokens = [{ text: chunk, url: token.url, color: token.color }];
+          lineWidth = activeFont.widthOfTextAtSize(chunk, fontSize);
+          flushLine();
+        }
+        continue;
+      }
+
+      if (isWhitespace && lineTokens.length === 0) {
+        continue;
+      }
+
+      if (lineWidth + tokenWidth > maxWidth && lineTokens.length > 0) {
+        flushLine();
+        if (isWhitespace) {
+          continue;
+        }
+      }
+
+      lineTokens.push(token);
+      lineWidth += tokenWidth;
+    }
+
+    flushLine();
   };
 
   const writeSectionHeading = (title: string, accent: ReturnType<typeof rgb>) => {
@@ -407,20 +530,36 @@ export async function buildPdfReport(
     if (input.references?.openai?.length) {
       writeLine('OpenAI references', { bold: true, size: 12, color: openaiAccent });
       for (const ref of input.references.openai) {
-        writeParagraph(
-          `[${ref.n}] ${ref.title ? `${ref.title} — ` : ''}${ref.url}${ref.accessedAt ? ` (accessed ${ref.accessedAt})` : ''}`,
-          { size: 10, color: muted }
-        );
+        const segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [
+          { text: `[${ref.n}]`, url: ref.url },
+          { text: ' ' }
+        ];
+        if (ref.title) {
+          segments.push({ text: `${ref.title} — ` });
+        }
+        segments.push({ text: ref.url, url: ref.url });
+        if (ref.accessedAt) {
+          segments.push({ text: ` (accessed ${ref.accessedAt})` });
+        }
+        writeLinkedParagraph(segments, { size: 10, color: muted });
       }
       y -= 6;
     }
     if (input.references?.gemini?.length) {
       writeLine('Gemini references', { bold: true, size: 12, color: geminiAccent });
       for (const ref of input.references.gemini) {
-        writeParagraph(
-          `[${ref.n}] ${ref.title ? `${ref.title} — ` : ''}${ref.url}${ref.accessedAt ? ` (accessed ${ref.accessedAt})` : ''}`,
-          { size: 10, color: muted }
-        );
+        const segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [
+          { text: `[${ref.n}]`, url: ref.url },
+          { text: ' ' }
+        ];
+        if (ref.title) {
+          segments.push({ text: `${ref.title} — ` });
+        }
+        segments.push({ text: ref.url, url: ref.url });
+        if (ref.accessedAt) {
+          segments.push({ text: ` (accessed ${ref.accessedAt})` });
+        }
+        writeLinkedParagraph(segments, { size: 10, color: muted });
       }
     }
   }

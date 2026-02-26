@@ -5,6 +5,7 @@ import { finalizeReport, handleRefinementApproval, regenerateReportForSession, r
 import { getDebugFlags } from '../../../../../lib/debug';
 import { checkRateLimit } from '../../../../../lib/rate-limit';
 import { listProviderResults } from '../../../../../lib/provider-repo';
+import { listSessionResearchSnapshots } from '../../../../../lib/research-orchestrator';
 
 export async function GET(_request: Request, { params }: { params: Promise<{ sessionId: string; action: string }> }) {
   const { sessionId, action } = await params;
@@ -18,7 +19,16 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
 
   if (process.env.DATABASE_URL) {
     try {
-      await syncSession(sessionId);
+      const debug = await getDebugFlags();
+      await syncSession(sessionId, {
+        stub: debug.stubExternals,
+        stubOpenAI: debug.stubOpenAI,
+        stubGemini: debug.stubGemini,
+        stubPdf: debug.stubPdf,
+        stubEmail: debug.stubEmail,
+        skipOpenAI: debug.skipOpenAI,
+        skipGemini: debug.skipGemini
+      });
     } catch {
       // best-effort; status polling should not hard-fail on sync errors
     }
@@ -28,7 +38,78 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
   if (!sessionRecord) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
-  const providerResults = await listProviderResults(sessionId);
+  const [providerResults, researchRuns] = await Promise.all([
+    listProviderResults(sessionId),
+    process.env.DATABASE_URL ? listSessionResearchSnapshots(sessionId) : Promise.resolve([])
+  ]);
+  const researchByProvider = ['openai', 'gemini'].map((provider) => {
+    const run = researchRuns.find((item) => item.run?.provider === provider)?.run;
+    const entry = researchRuns.find((item) => item.run?.provider === provider);
+    if (!run || !entry) return null;
+    const progress = (run.progress_json && typeof run.progress_json === 'object'
+      ? run.progress_json
+      : null) as Record<string, unknown> | null;
+    const activeStepIndex =
+      progress && typeof progress.step_index === 'number' && Number.isFinite(progress.step_index)
+        ? Math.max(0, Math.trunc(progress.step_index))
+        : Math.max(0, run.current_step_index);
+    const normalizedSteps = entry.steps.map((step: any) => ({ ...step }));
+    const hasRunning = normalizedSteps.some((step: any) => step.status === 'running');
+    if (run.state === 'IN_PROGRESS' && !hasRunning) {
+      const target = normalizedSteps.find((step: any) => Number(step.step_index) === activeStepIndex);
+      if (target && target.status !== 'done' && target.status !== 'failed') {
+        target.status = 'running';
+      }
+    }
+    return {
+      provider,
+      runId: run.id,
+      state: run.state,
+      stepIndex: run.current_step_index,
+      maxSteps: run.max_steps,
+      mode: run.mode,
+      progress: progress
+        ? {
+            stepId: typeof progress.step_id === 'string' ? progress.step_id : null,
+            stepLabel: typeof progress.step_label === 'string' ? progress.step_label : null,
+            stepNumber: typeof progress.step_index === 'number' ? progress.step_index : run.current_step_index,
+            totalSteps: typeof progress.total_steps === 'number' ? progress.total_steps : run.max_steps
+          }
+        : null,
+      steps: normalizedSteps.map((step: any) => ({
+        id: step.id,
+        stepIndex: step.step_index,
+        stepType: step.step_type,
+        status: step.status,
+        stepGoal: step.step_goal,
+        outputExcerpt: step.output_excerpt,
+        errorMessage: step.error_message,
+        startedAt: step.started_at,
+        completedAt: step.completed_at
+      })),
+      sourceCount: entry.sources.length
+    };
+  }).filter(Boolean) as Array<{
+    provider: string;
+    runId: string;
+    state: string;
+    stepIndex: number;
+    maxSteps: number;
+    mode: string;
+    progress: { stepId: string | null; stepLabel: string | null; stepNumber: number; totalSteps: number } | null;
+    steps: Array<{
+      id: string;
+      stepIndex: number;
+      stepType: string;
+      status: string;
+      stepGoal: string | null;
+      outputExcerpt: string | null;
+      errorMessage: string | null;
+      startedAt: string | null;
+      completedAt: string | null;
+    }>;
+    sourceCount: number;
+  }>;
   return NextResponse.json({
     state: sessionRecord.state,
     updatedAt: sessionRecord.updated_at,
@@ -40,7 +121,10 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
       startedAt: result.started_at,
       completedAt: result.completed_at,
       errorMessage: result.error_message
-    }))
+    })),
+    research: {
+      providers: researchByProvider
+    }
   });
 }
 

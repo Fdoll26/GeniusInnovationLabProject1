@@ -14,6 +14,34 @@ export type SessionStatus = {
     completedAt: string | null;
     errorMessage: string | null;
   }>;
+  research?: {
+    providers: Array<{
+      provider: 'openai' | 'gemini';
+      runId: string;
+      state: string;
+      stepIndex: number;
+      maxSteps: number;
+      mode: 'native' | 'custom';
+      sourceCount: number;
+      progress: {
+        stepId: string | null;
+        stepLabel: string | null;
+        stepNumber: number;
+        totalSteps: number;
+      } | null;
+      steps: Array<{
+        id: string;
+        stepIndex: number;
+        stepType: string;
+        status: string;
+        stepGoal: string | null;
+        outputExcerpt: string | null;
+        errorMessage: string | null;
+        startedAt: string | null;
+        completedAt: string | null;
+      }>;
+    }>;
+  } | null;
 };
 
 export function useSessionStatus(sessionId: string | null) {

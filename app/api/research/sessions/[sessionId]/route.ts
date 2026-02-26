@@ -5,6 +5,7 @@ import { listQuestions } from '../../../../lib/refinement-repo';
 import { listProviderResults } from '../../../../lib/provider-repo';
 import { getReportBySession } from '../../../../lib/report-repo';
 import { syncSession } from '../../../../lib/orchestration';
+import { getSessionResearchSnapshot } from '../../../../lib/research-orchestrator';
 
 export async function GET(
   _request: Request,
@@ -25,16 +26,18 @@ export async function GET(
   if (!sessionRecord) {
     return NextResponse.json({ error: 'Not found' }, { status: 404 });
   }
-  const [questions, providerResults, report] = await Promise.all([
+  const [questions, providerResults, report, research] = await Promise.all([
     listQuestions(sessionId),
     listProviderResults(sessionId),
-    getReportBySession(sessionId)
+    getReportBySession(sessionId),
+    getSessionResearchSnapshot(sessionId)
   ]);
   return NextResponse.json({
     session: sessionRecord,
     refinementQuestions: questions,
     providerResults,
-    report
+    report,
+    research
   });
 }
 

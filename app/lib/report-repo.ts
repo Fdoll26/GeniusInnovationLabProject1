@@ -89,7 +89,7 @@ export async function claimReportSendForSession(sessionId: string): Promise<stri
        SET email_status = 'sending'
        WHERE id = (SELECT id FROM candidate)
          AND NOT EXISTS (
-           SELECT 1 FROM reports WHERE session_id = $1 AND email_status = 'sent'
+           SELECT 1 FROM reports WHERE session_id = $1 AND email_status IN ('sent', 'sending')
          )
        RETURNING id
      )
