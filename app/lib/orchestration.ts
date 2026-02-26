@@ -31,6 +31,14 @@ async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): P
   const lockKey = `session_run:${sessionId}`;
   if (pool) {
     const client = await pool.connect();
+    const onClientError = (error: unknown) => {
+      console.error('[db.client_error][session_run_lock]', {
+        sessionId,
+        lockKey,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    };
+    client.on('error', onClientError);
     try {
       const result = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey]);
       if (!result.rows[0]?.ok) {
@@ -46,6 +54,7 @@ async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): P
         }
       }
     } finally {
+      client.off('error', onClientError);
       client.release();
     }
   }

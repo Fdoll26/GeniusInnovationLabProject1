@@ -82,8 +82,9 @@ describe('research-provider', () => {
       timeoutMs: 30_000
     });
 
-    expect(out.plan.steps.length).toBe(3);
+    expect(out.plan.steps.length).toBe(8);
     expect(out.plan.steps[0]?.step_type).toBe('DEVELOP_RESEARCH_PLAN');
+    expect(out.plan.steps[7]?.step_type).toBe('SECTION_SYNTHESIS');
     expect(runGeminiReasoningStep).toHaveBeenCalledWith(
       expect.objectContaining({
         structuredOutput: expect.objectContaining({

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireSession } from '../../../../../lib/authz';
+import { requireSession, unauthorizedResponse } from '../../../../../lib/authz';
 import { assertSessionOwnership, getSessionById, getUserIdByEmail } from '../../../../../lib/session-repo';
 import { finalizeReport, handleRefinementApproval, regenerateReportForSession, runProviders, syncSession } from '../../../../../lib/orchestration';
 import { getDebugFlags } from '../../../../../lib/debug';
@@ -27,15 +27,47 @@ function shouldAttemptStatusSync(sessionId: string): boolean {
   return true;
 }
 
-export async function GET(_request: Request, { params }: { params: Promise<{ sessionId: string; action: string }> }) {
-  const { sessionId, action } = await params;
-  if (action !== 'status') {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+function normalizeProviderStepsForDisplay(
+  steps: Array<any>,
+  runState: string,
+  activeStepIndex: number
+): Array<any> {
+  const normalized = steps.map((step) => ({ ...step }));
+  if (runState !== 'IN_PROGRESS') {
+    return normalized;
   }
 
-  const session = await requireSession();
-  const userId = await getUserIdByEmail(session.user!.email!);
-  await assertSessionOwnership(sessionId, userId);
+  return normalized.map((step) => {
+    const idx = Number(step.step_index);
+    if (!Number.isFinite(idx)) {
+      return step;
+    }
+
+    // The pipeline executes strictly one stage at a time. Use run progress as source of truth
+    // to smooth over transient DB status lag (e.g. prior step briefly still marked "running").
+    if (idx < activeStepIndex && (step.status === 'running' || step.status === 'queued' || step.status === 'planned')) {
+      return { ...step, status: 'done' };
+    }
+    if (idx === activeStepIndex && step.status !== 'done' && step.status !== 'failed') {
+      return { ...step, status: 'running' };
+    }
+    if (idx > activeStepIndex && step.status === 'running') {
+      return { ...step, status: 'queued' };
+    }
+    return step;
+  });
+}
+
+export async function GET(_request: Request, { params }: { params: Promise<{ sessionId: string; action: string }> }) {
+  try {
+    const { sessionId, action } = await params;
+    if (action !== 'status') {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    }
+
+    const session = await requireSession();
+    const userId = await getUserIdByEmail(session.user!.email!);
+    await assertSessionOwnership(sessionId, userId);
 
   let sessionRecord = await getSessionById(sessionId);
   if (!sessionRecord) {
@@ -79,14 +111,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
       progress && typeof progress.step_index === 'number' && Number.isFinite(progress.step_index)
         ? Math.max(0, Math.trunc(progress.step_index))
         : Math.max(0, run.current_step_index);
-    const normalizedSteps = entry.steps.map((step: any) => ({ ...step }));
-    const hasRunning = normalizedSteps.some((step: any) => step.status === 'running');
-    if (run.state === 'IN_PROGRESS' && !hasRunning) {
-      const target = normalizedSteps.find((step: any) => Number(step.step_index) === activeStepIndex);
-      if (target && target.status !== 'done' && target.status !== 'failed') {
-        target.status = 'running';
-      }
-    }
+    const normalizedSteps = normalizeProviderStepsForDisplay(entry.steps, run.state, activeStepIndex);
     return {
       provider,
       runId: run.id,
@@ -136,29 +161,35 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
     }>;
     sourceCount: number;
   }>;
-  return NextResponse.json({
-    state: sessionRecord.state,
-    updatedAt: sessionRecord.updated_at,
-    refinedAt: sessionRecord.refined_at,
-    completedAt: sessionRecord.completed_at,
-    providers: providerResults.map((result) => ({
-      provider: result.provider,
-      status: result.status,
-      startedAt: result.started_at,
-      completedAt: result.completed_at,
-      errorMessage: result.error_message
-    })),
-    research: {
-      providers: researchByProvider
-    }
-  });
+    return NextResponse.json({
+      state: sessionRecord.state,
+      updatedAt: sessionRecord.updated_at,
+      refinedAt: sessionRecord.refined_at,
+      completedAt: sessionRecord.completed_at,
+      providers: providerResults.map((result) => ({
+        provider: result.provider,
+        status: result.status,
+        startedAt: result.started_at,
+        completedAt: result.completed_at,
+        errorMessage: result.error_message
+      })),
+      research: {
+        providers: researchByProvider
+      }
+    });
+  } catch (error) {
+    const response = unauthorizedResponse(error);
+    if (response) return response;
+    throw error;
+  }
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ sessionId: string; action: string }> }) {
-  const { sessionId, action } = await params;
-  const session = await requireSession();
-  const userId = await getUserIdByEmail(session.user!.email!);
-  await assertSessionOwnership(sessionId, userId);
+  try {
+    const { sessionId, action } = await params;
+    const session = await requireSession();
+    const userId = await getUserIdByEmail(session.user!.email!);
+    await assertSessionOwnership(sessionId, userId);
 
   if (action === 'approve') {
     try {
@@ -237,5 +268,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ ses
     return NextResponse.json({ ok: true, reportId: result.reportId });
   }
 
-  return NextResponse.json({ error: 'Not found' }, { status: 404 });
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  } catch (error) {
+    const response = unauthorizedResponse(error);
+    if (response) return response;
+    throw error;
+  }
 }

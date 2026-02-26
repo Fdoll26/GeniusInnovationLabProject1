@@ -326,4 +326,66 @@ describe('research-orchestrator gap loop', () => {
       })
     );
   });
+
+  it('fails a step after retryable-error retry limit is exceeded', async () => {
+    getResearchRunById.mockResolvedValueOnce({
+      id: 'run4',
+      session_id: 's1',
+      state: 'IN_PROGRESS',
+      provider: 'openai',
+      mode: 'custom',
+      depth: 'standard',
+      question: 'q',
+      clarifying_questions_json: null,
+      assumptions_json: null,
+      clarifications_json: null,
+      research_brief_json: null,
+      research_plan_json: null,
+      progress_json: {},
+      current_step_index: 1,
+      max_steps: 8,
+      target_sources_per_step: 5,
+      max_total_sources: 40,
+      max_tokens_per_step: 1800,
+      min_word_count: 2500,
+      synthesized_report_md: null,
+      synthesized_sources_json: null,
+      synthesized_citation_map_json: null,
+      error_message: null,
+      created_at: '2026-02-20T00:00:00.000Z',
+      updated_at: '2026-02-20T00:00:00.000Z',
+      completed_at: null
+    });
+    listResearchSteps.mockResolvedValueOnce([
+      { id: 's0', step_index: 0, status: 'done', step_type: 'DEVELOP_RESEARCH_PLAN' },
+      {
+        id: 's1',
+        step_index: 1,
+        status: 'queued',
+        step_type: 'DISCOVER_SOURCES_WITH_PLAN',
+        provider_native_json: { retryable_error_count: 3 }
+      }
+    ]);
+
+    const { executePipelineStep } = await import('../../app/lib/research-provider');
+    vi.mocked(executePipelineStep).mockRejectedValueOnce(new Error('timeout while waiting for provider'));
+
+    const result = await tick('run4');
+
+    expect(result).toEqual({ state: 'FAILED', done: true });
+    expect(updateResearchRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run4',
+        state: 'FAILED',
+        completed: true
+      })
+    );
+    expect(upsertResearchStep).toHaveBeenCalledWith(
+      expect.objectContaining({
+        runId: 'run4',
+        stepIndex: 1,
+        status: 'failed'
+      })
+    );
+  });
 });

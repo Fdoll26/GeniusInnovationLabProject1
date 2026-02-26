@@ -87,6 +87,24 @@ function isRetryableResearchError(error: unknown): boolean {
   );
 }
 
+const MAX_RETRYABLE_STEP_ERRORS = Number.parseInt(process.env.RESEARCH_STEP_MAX_RETRYABLE_ERRORS ?? '3', 10);
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function getRetryableErrorCount(providerNative: unknown): number {
+  const record = asRecord(providerNative);
+  const count = Number(record?.retryable_error_count);
+  if (!Number.isFinite(count) || count < 0) {
+    return 0;
+  }
+  return Math.trunc(count);
+}
+
 function summarizePriorSteps(steps: Awaited<ReturnType<typeof listResearchSteps>>) {
   return steps
     .slice(-4)
@@ -455,6 +473,34 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
     return { state: isDone ? 'DONE' : 'IN_PROGRESS', done: isDone };
   } catch (error) {
     if (isRetryableResearchError(error)) {
+      const retryableErrorCount = getRetryableErrorCount(existingCurrent?.provider_native_json) + 1;
+      if (retryableErrorCount > Math.max(1, MAX_RETRYABLE_STEP_ERRORS)) {
+        const terminalMessage = `Step ${stepId} exceeded retry limit after ${retryableErrorCount - 1} transient errors: ${
+          error instanceof Error ? error.message : 'Transient research step error'
+        }`;
+        await upsertResearchStep({
+          runId,
+          stepIndex: currentIndex,
+          stepType: stepId,
+          status: 'failed',
+          provider: run.provider,
+          mode: run.mode,
+          errorMessage: terminalMessage,
+          providerNative: {
+            retryable_error_count: retryableErrorCount - 1,
+            retry_exhausted: true
+          },
+          completed: true
+        });
+        await updateResearchRun({
+          runId,
+          state: 'FAILED',
+          errorMessage: terminalMessage,
+          completed: true
+        });
+        return { state: 'FAILED', done: true };
+      }
+
       await upsertResearchStep({
         runId,
         stepIndex: currentIndex,
@@ -462,7 +508,11 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         status: 'queued',
         provider: run.provider,
         mode: run.mode,
-        errorMessage: error instanceof Error ? error.message : 'Transient research step error'
+        errorMessage: error instanceof Error ? error.message : 'Transient research step error',
+        providerNative: {
+          retryable_error_count: retryableErrorCount,
+          last_retryable_error_at: new Date().toISOString()
+        }
       });
       return { state: 'IN_PROGRESS', done: false };
     }

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { requireSession } from '../../../lib/authz';
+import { requireSession, unauthorizedResponse } from '../../../lib/authz';
 import { buildPdfReport } from '../../../lib/pdf-report';
 import { sendReportEmail } from '../../../lib/email-sender';
 import { getDebugFlags } from '../../../lib/debug';
@@ -12,10 +12,11 @@ function notFound() {
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ action: string }> }) {
-  const { action } = await params;
-  if (process.env.NODE_ENV === 'production') {
-    return notFound();
-  }
+  try {
+    const { action } = await params;
+    if (process.env.NODE_ENV === 'production') {
+      return notFound();
+    }
 
   if (action === 'bypass') {
     const body = await request.json().catch(() => ({}));
@@ -129,6 +130,10 @@ export async function POST(request: Request, { params }: { params: Promise<{ act
     return NextResponse.json({ ok: true });
   }
 
-  return notFound();
+    return notFound();
+  } catch (error) {
+    const response = unauthorizedResponse(error);
+    if (response) return response;
+    throw error;
+  }
 }
-

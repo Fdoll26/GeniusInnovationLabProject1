@@ -247,8 +247,9 @@ export function normalizeResearchPlan(
   const typed = plan as Record<string, unknown>;
 
   const rawSteps = Array.isArray(typed.steps) ? typed.steps : [];
+  const desiredSteps = Math.max(1, Math.min(input.maxSteps, STEP_SEQUENCE.length));
   const normalizedSteps = rawSteps
-    .slice(0, Math.max(1, Math.min(input.maxSteps, STEP_SEQUENCE.length)))
+    .slice(0, desiredSteps)
     .map((step, index) =>
       normalizePlanStep(step, {
         index,
@@ -267,9 +268,21 @@ export function normalizeResearchPlan(
   for (const step of normalizedSteps) {
     byIndex.set(step.step_index, step);
   }
+  // Fill missing indices with canonical fallback stages so workflow remains complete and predictable.
+  const fallbackSteps = buildFallbackResearchPlan({
+    refinedTopic: input.refinedTopic,
+    sourceTarget: input.sourceTarget,
+    maxTokensPerStep: input.maxTokensPerStep,
+    maxTotalSources: input.maxTotalSources
+  }).steps;
+  for (let index = 0; index < desiredSteps; index += 1) {
+    if (!byIndex.has(index) && fallbackSteps[index]) {
+      byIndex.set(index, fallbackSteps[index]);
+    }
+  }
   const ordered = [...byIndex.entries()]
     .sort((a, b) => a[0] - b[0])
-    .slice(0, Math.max(1, Math.min(input.maxSteps, STEP_SEQUENCE.length)))
+    .slice(0, desiredSteps)
     .map(([index, step]) => ({ ...step, step_index: index }));
 
   const assumptions = asTextArray(typed.assumptions, 12);
