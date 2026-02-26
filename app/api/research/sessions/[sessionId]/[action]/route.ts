@@ -7,6 +7,26 @@ import { checkRateLimit } from '../../../../../lib/rate-limit';
 import { listProviderResults } from '../../../../../lib/provider-repo';
 import { listSessionResearchSnapshots } from '../../../../../lib/research-orchestrator';
 
+const STATUS_SYNC_THROTTLE_MS = Number.parseInt(process.env.STATUS_SYNC_THROTTLE_MS ?? '15000', 10);
+const lastStatusSyncAttemptBySession = new Map<string, number>();
+
+function shouldAttemptStatusSync(sessionId: string): boolean {
+  const now = Date.now();
+  const nextAllowedAt = lastStatusSyncAttemptBySession.get(sessionId) ?? 0;
+  if (now < nextAllowedAt) {
+    return false;
+  }
+  lastStatusSyncAttemptBySession.set(sessionId, now + Math.max(1000, STATUS_SYNC_THROTTLE_MS));
+  if (lastStatusSyncAttemptBySession.size > 2000) {
+    for (const [key, value] of lastStatusSyncAttemptBySession.entries()) {
+      if (value < now) {
+        lastStatusSyncAttemptBySession.delete(key);
+      }
+    }
+  }
+  return true;
+}
+
 export async function GET(_request: Request, { params }: { params: Promise<{ sessionId: string; action: string }> }) {
   const { sessionId, action } = await params;
   if (action !== 'status') {
@@ -17,7 +37,16 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
   const userId = await getUserIdByEmail(session.user!.email!);
   await assertSessionOwnership(sessionId, userId);
 
-  if (process.env.DATABASE_URL) {
+  let sessionRecord = await getSessionById(sessionId);
+  if (!sessionRecord) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+
+  if (
+    process.env.DATABASE_URL &&
+    (sessionRecord.state === 'running_research' || sessionRecord.state === 'aggregating') &&
+    shouldAttemptStatusSync(sessionId)
+  ) {
     try {
       const debug = await getDebugFlags();
       await syncSession(sessionId, {
@@ -29,15 +58,12 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
         skipOpenAI: debug.skipOpenAI,
         skipGemini: debug.skipGemini
       });
+      sessionRecord = (await getSessionById(sessionId)) ?? sessionRecord;
     } catch {
       // best-effort; status polling should not hard-fail on sync errors
     }
   }
 
-  const sessionRecord = await getSessionById(sessionId);
-  if (!sessionRecord) {
-    return NextResponse.json({ error: 'Not found' }, { status: 404 });
-  }
   const [providerResults, researchRuns] = await Promise.all([
     listProviderResults(sessionId),
     process.env.DATABASE_URL ? listSessionResearchSnapshots(sessionId) : Promise.resolve([])

@@ -11,7 +11,7 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
     return <div className="card">No active session.</div>;
   }
 
-  if (error) {
+  if (error && !status) {
     return <div className="card">Status error: {error}</div>;
   }
 
@@ -123,6 +123,7 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
         </div>
       ) : null}
       <small>Updated: {new Date(status.updatedAt).toLocaleString()}</small>
+      {error ? <small className="muted">Refresh warning: {error}. Showing last known status.</small> : null}
       {isFailed ? <p role="alert">Session completed with errors.</p> : null}
 
       <details className="details">

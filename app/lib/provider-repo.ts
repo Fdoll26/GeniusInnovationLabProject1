@@ -68,7 +68,7 @@ export async function upsertProviderResult(params: {
          error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
          error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
          queued_at = COALESCE(EXCLUDED.queued_at, provider_results.queued_at),
-         started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
+         started_at = COALESCE(provider_results.started_at, EXCLUDED.started_at),
          completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at),
          external_id = COALESCE(EXCLUDED.external_id, provider_results.external_id),
          external_status = COALESCE(EXCLUDED.external_status, provider_results.external_status),
@@ -122,7 +122,7 @@ export async function upsertProviderResult(params: {
            error_code = COALESCE(EXCLUDED.error_code, provider_results.error_code),
            error_message = COALESCE(EXCLUDED.error_message, provider_results.error_message),
            queued_at = COALESCE(EXCLUDED.queued_at, provider_results.queued_at),
-           started_at = COALESCE(EXCLUDED.started_at, provider_results.started_at),
+           started_at = COALESCE(provider_results.started_at, EXCLUDED.started_at),
            completed_at = COALESCE(EXCLUDED.completed_at, provider_results.completed_at)`,
         [
           params.sessionId,
