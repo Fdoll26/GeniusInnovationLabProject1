@@ -291,6 +291,7 @@ export async function upsertResearchStep(params: {
   providerNative?: Record<string, unknown> | null;
   errorMessage?: string | null;
   started?: boolean;
+  startedAt?: string | null;
   completed?: boolean;
 }): Promise<ResearchStepRecord> {
   const statusValue = params.status === 'planned' ? 'queued' : params.status;
@@ -301,7 +302,7 @@ export async function upsertResearchStep(params: {
      ) VALUES (
        $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
        $11,$12,$13,$14,$15,$16,$17,
-       $18,$19, CASE WHEN $20::boolean THEN now() ELSE NULL END, CASE WHEN $21::boolean THEN now() ELSE NULL END, now()
+       $18,$19, COALESCE($20::timestamptz, CASE WHEN $21::boolean THEN now() ELSE NULL END), CASE WHEN $22::boolean THEN now() ELSE NULL END, now()
      )
      ON CONFLICT (run_id, step_index)
      DO UPDATE SET
@@ -322,9 +323,9 @@ export async function upsertResearchStep(params: {
        token_usage_json = COALESCE(EXCLUDED.token_usage_json, research_steps.token_usage_json),
        provider_native_json = COALESCE(EXCLUDED.provider_native_json, research_steps.provider_native_json),
        error_message = COALESCE(EXCLUDED.error_message, research_steps.error_message),
-       started_at = COALESCE(research_steps.started_at, CASE WHEN $20::boolean THEN now() ELSE NULL END),
+       started_at = COALESCE(research_steps.started_at, EXCLUDED.started_at, CASE WHEN $21::boolean THEN now() ELSE NULL END),
        completed_at = CASE
-         WHEN $21::boolean THEN now()
+         WHEN $22::boolean THEN now()
          ELSE research_steps.completed_at
        END,
        updated_at = now()
@@ -349,6 +350,7 @@ export async function upsertResearchStep(params: {
     jsonOrNull(params.tokenUsage),
     jsonOrNull(params.providerNative),
     params.errorMessage ?? null,
+    params.startedAt ?? null,
     params.started ?? false,
     params.completed ?? false
   ];

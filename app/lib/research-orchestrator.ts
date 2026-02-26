@@ -132,6 +132,12 @@ async function executePlannedStep(params: {
   totalSteps: number;
 }) {
   const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps } = params;
+  const existingSteps = await listResearchSteps(runId);
+  const runStartedAt =
+    existingSteps
+      .map((s) => s.started_at)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0)
+      .sort()[0] ?? new Date().toISOString();
 
   await upsertResearchStep({
     runId,
@@ -142,7 +148,8 @@ async function executePlannedStep(params: {
     mode: run.mode,
     stepGoal: `Execute ${stepId.toLowerCase().replace(/_/g, ' ')}`,
     inputsSummary: `step ${currentIndex + 1}/${totalSteps}`,
-    started: true
+    started: true,
+    startedAt: runStartedAt
   });
   await updateResearchRun({
     runId,
