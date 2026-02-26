@@ -11,9 +11,18 @@ import { getUserSettings } from './user-settings-repo';
 import { pool } from './db';
 import { getResearchSnapshotByRunId, getSessionResearchSnapshot, getSessionResearchSnapshotByProvider, startRun, tick } from './research-orchestrator';
 import { parseDeepResearchJobPayload, type DeepResearchJobPayload } from './deep-research-job';
-import { claimQueuedResearchRun, markResearchRunQueued, updateResearchRun } from './research-run-repo';
+import {
+  claimQueuedResearchRun,
+  createResearchRun,
+  initializePlannedResearchSteps,
+  markResearchRunQueued,
+  updateResearchRun,
+  upsertResearchStep
+} from './research-run-repo';
 import { enqueueOpenAiLaneJob } from './queue/openai';
 import { enqueueGeminiLaneJob } from './queue/gemini';
+import { buildFallbackResearchPlan } from './research-plan-schema';
+import { STEP_LABELS, STEP_SEQUENCE } from './research-types';
 
 const inMemorySessionLocks = new Set<string>();
 
@@ -395,6 +404,156 @@ function buildDeepResearchJob(params: {
   });
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, n));
+}
+
+function defaultWordTarget(depth: 'light' | 'standard' | 'deep') {
+  if (depth === 'deep') return 6000;
+  if (depth === 'light') return 1200;
+  return 2500;
+}
+
+function parseJson<T>(value: unknown, fallback: T): T {
+  if (value == null) return fallback;
+  if (typeof value === 'string') {
+    try {
+      return JSON.parse(value) as T;
+    } catch {
+      return fallback;
+    }
+  }
+  return value as T;
+}
+
+async function ensureStubResearchRun(params: {
+  sessionId: string;
+  userId: string;
+  provider: 'openai' | 'gemini';
+  question: string;
+  existingModelRunId?: string | null;
+}) {
+  let snapshot =
+    params.existingModelRunId
+      ? await getResearchSnapshotByRunId(params.existingModelRunId)
+      : await getSessionResearchSnapshotByProvider(params.sessionId, params.provider);
+  if (snapshot && (snapshot.run.session_id !== params.sessionId || snapshot.run.provider !== params.provider)) {
+    snapshot = null;
+  }
+  if (snapshot && snapshot.run.state !== 'FAILED' && snapshot.run.state !== 'DONE') {
+    return snapshot.run.id;
+  }
+
+  const settings = await getUserSettings(params.userId);
+  const maxSteps = STEP_SEQUENCE.length;
+  const targetSourcesPerStep = clamp(settings.research_target_sources_per_step, 1, 25);
+  const maxTotalSources = clamp(settings.research_max_total_sources, 5, 400);
+  const maxTokensPerStep = clamp(settings.research_max_tokens_per_step, 300, 8000);
+  const plan = buildFallbackResearchPlan({
+    refinedTopic: params.question,
+    sourceTarget: targetSourcesPerStep,
+    maxTokensPerStep,
+    maxTotalSources
+  });
+  const run = await createResearchRun({
+    sessionId: params.sessionId,
+    provider: params.provider,
+    mode: settings.research_mode,
+    depth: settings.research_depth,
+    question: params.question,
+    maxSteps,
+    targetSourcesPerStep,
+    maxTotalSources,
+    maxTokensPerStep,
+    minWordCount: defaultWordTarget(settings.research_depth)
+  });
+  await updateResearchRun({
+    runId: run.id,
+    state: 'PLANNED',
+    plan,
+    assumptions: plan.assumptions,
+    brief: {
+      audience: 'General',
+      scope: 'Stubbed provider lane',
+      depth: settings.research_depth
+    },
+    progress: {
+      step_id: STEP_SEQUENCE[0],
+      step_index: 0,
+      total_steps: STEP_SEQUENCE.length,
+      step_label: STEP_LABELS[STEP_SEQUENCE[0]],
+      gap_loops: 0
+    }
+  });
+  await initializePlannedResearchSteps({
+    runId: run.id,
+    provider: run.provider,
+    mode: run.mode,
+    steps: plan.steps.map((step, idx) => ({
+      stepIndex: step.step_index ?? idx,
+      stepType: step.step_type,
+      stepGoal: step.objective,
+      inputsSummary: `planned queries=${step.search_query_pack.length} source_types=${step.target_source_types.length}`
+    }))
+  });
+  return run.id;
+}
+
+async function completeStubRun(params: {
+  runId: string;
+  provider: 'openai' | 'gemini';
+  refinedPrompt: string;
+}) {
+  const snapshot = await getResearchSnapshotByRunId(params.runId);
+  if (!snapshot) {
+    throw new Error(`ModelRun ${params.runId} not found for stub completion`);
+  }
+  const run = snapshot.run;
+  const baseMessage = `Stubbed ${params.provider} lane via DEV_STUB_${params.provider.toUpperCase()} for prompt: ${params.refinedPrompt}`;
+  const plan = parseJson<{ steps?: Array<{ step_type?: string }> } | null>(run.research_plan_json, null);
+  const plannedTypes = (plan?.steps ?? [])
+    .map((step) => step?.step_type)
+    .filter((value): value is (typeof STEP_SEQUENCE)[number] => STEP_SEQUENCE.includes(value as (typeof STEP_SEQUENCE)[number]));
+  const stepTypes = plannedTypes.length > 0 ? plannedTypes : [...STEP_SEQUENCE];
+
+  for (let idx = 0; idx < stepTypes.length; idx += 1) {
+    const stepType = stepTypes[idx];
+    await upsertResearchStep({
+      runId: run.id,
+      stepIndex: idx,
+      stepType,
+      status: 'done',
+      provider: run.provider,
+      mode: run.mode,
+      stepGoal: `Stubbed: ${STEP_LABELS[stepType]}`,
+      inputsSummary: 'Skipped external API call in stub mode',
+      rawOutput: `${baseMessage}. Step "${STEP_LABELS[stepType]}" marked stubbed.`,
+      outputExcerpt: `${baseMessage}.`,
+      toolsUsed: [],
+      providerNative: { stubbed: true, provider: params.provider, stepType },
+      completed: true,
+      started: true
+    });
+  }
+
+  const synthesizedReport = `${baseMessage}\n\nNo external API calls were made for this provider lane.`;
+  await updateResearchRun({
+    runId: run.id,
+    state: 'DONE',
+    currentStepIndex: stepTypes.length,
+    progress: {
+      step_id: null,
+      step_index: stepTypes.length,
+      total_steps: stepTypes.length,
+      step_label: null
+    },
+    synthesizedReportMd: synthesizedReport,
+    synthesizedSources: [],
+    completed: true
+  });
+  return synthesizedReport;
+}
+
 async function processDeepResearchJob(params: {
   job: DeepResearchJobPayload;
 }) {
@@ -527,6 +686,7 @@ async function advanceProviderFromQueue(params: {
 }) {
   const nowIso = new Date().toISOString();
   const skip = params.provider === 'openai' ? params.opts?.skipOpenAI : params.opts?.skipGemini;
+  const stub = params.provider === 'openai' ? params.opts?.stubOpenAI ?? params.opts?.stub : params.opts?.stubGemini ?? params.opts?.stub;
   if (skip) {
     logDeepResearchTransition('terminal', {
       topicId: params.sessionId,
@@ -547,6 +707,55 @@ async function advanceProviderFromQueue(params: {
       lastPolledAt: nowIso
     });
     return { terminal: true as const };
+  }
+
+  if (stub && process.env.DATABASE_URL) {
+    try {
+      const runId = await ensureStubResearchRun({
+        sessionId: params.sessionId,
+        userId: params.userId,
+        provider: params.provider,
+        question: params.refinedPrompt,
+        existingModelRunId: params.modelRunId ?? null
+      });
+      const outputText = await completeStubRun({
+        runId,
+        provider: params.provider,
+        refinedPrompt: params.refinedPrompt
+      });
+      await upsertProviderResult({
+        sessionId: params.sessionId,
+        modelRunId: runId,
+        provider: params.provider,
+        status: 'stubbed',
+        outputText,
+        sources: [],
+        startedAt: nowIso,
+        completedAt: nowIso,
+        lastPolledAt: nowIso
+      });
+      logDeepResearchTransition('terminal', {
+        topicId: params.sessionId,
+        modelRunId: runId,
+        provider: params.provider,
+        stepId: null,
+        jobId: `${params.provider}:${runId}:stubbed`,
+        attempt: 1,
+        status: 'stubbed'
+      });
+      return { terminal: true as const };
+    } catch (error) {
+      await upsertProviderResult({
+        sessionId: params.sessionId,
+        modelRunId: params.modelRunId ?? null,
+        provider: params.provider,
+        status: 'failed',
+        errorMessage: error instanceof Error ? error.message : 'Stub provider error',
+        completedAt: new Date().toISOString(),
+        lastPolledAt: new Date().toISOString()
+      });
+      return { terminal: true as const };
+    }
   }
 
   if (!process.env.DATABASE_URL) {
@@ -684,6 +893,7 @@ async function runProvidersLegacy(
     if (!process.env.DATABASE_URL) {
       return null;
     }
+    const providerStub = provider === 'openai' ? opts?.stubOpenAI ?? opts?.stub : opts?.stubGemini ?? opts?.stub;
     if (existingModelRunId) {
       const existingSnapshot = await getResearchSnapshotByRunId(existingModelRunId);
       if (existingSnapshot && existingSnapshot.run.session_id === sessionId && existingSnapshot.run.provider === provider) {
@@ -696,6 +906,15 @@ async function runProvidersLegacy(
     }
     if (!session?.refined_prompt) {
       return null;
+    }
+    if (providerStub) {
+      return ensureStubResearchRun({
+        sessionId,
+        userId: session.user_id,
+        provider,
+        question: session.refined_prompt,
+        existingModelRunId: existingModelRunId ?? null
+      });
     }
     await startRun({
       sessionId,
@@ -711,7 +930,7 @@ async function runProvidersLegacy(
   const existingOpenAi = existingByProvider.get('openai');
   const laneJobs: Array<Promise<{ terminal: boolean }>> = [];
 
-  if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && !opts?.skipOpenAI) {
+  if (existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'running' && existingOpenAi?.status !== 'stubbed' && !opts?.skipOpenAI) {
     const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
@@ -773,7 +992,7 @@ async function runProvidersLegacy(
     );
   }
 
-  if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed') {
+  if (opts?.skipOpenAI && existingOpenAi?.status !== 'completed' && existingOpenAi?.status !== 'stubbed') {
     const modelRunId = await ensureModelRunId('openai', existingOpenAi?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
@@ -787,7 +1006,7 @@ async function runProvidersLegacy(
   }
 
   const existingGemini = existingByProvider.get('gemini');
-  if (existingGemini?.status !== 'completed' && existingGemini?.status !== 'running' && !opts?.skipGemini) {
+  if (existingGemini?.status !== 'completed' && existingGemini?.status !== 'running' && existingGemini?.status !== 'stubbed' && !opts?.skipGemini) {
     const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
@@ -849,7 +1068,7 @@ async function runProvidersLegacy(
     );
   }
 
-  if (opts?.skipGemini && existingGemini?.status !== 'completed') {
+  if (opts?.skipGemini && existingGemini?.status !== 'completed' && existingGemini?.status !== 'stubbed') {
     const modelRunId = await ensureModelRunId('gemini', existingGemini?.model_run_id ?? null);
     await upsertProviderResult({
       sessionId,
@@ -904,7 +1123,7 @@ async function syncSessionLegacy(
 
   const updatedResults = await listProviderResults(sessionId);
   const stillInFlight = updatedResults.some((r) => r.status === 'running' || r.status === 'queued');
-  const terminal = new Set(['completed', 'failed', 'skipped']);
+  const terminal = new Set(['completed', 'failed', 'skipped', 'stubbed']);
   const allTerminal = updatedResults.length > 0 && updatedResults.every((r) => terminal.has(r.status));
   if (!stillInFlight && allTerminal) {
     await updateSessionState({ sessionId, state: 'aggregating' });
@@ -935,7 +1154,7 @@ export async function runProviders(
   if (didRun === null) return;
 
   const results = await listProviderResults(sessionId);
-  const terminal = new Set(['completed', 'failed', 'skipped']);
+  const terminal = new Set(['completed', 'failed', 'skipped', 'stubbed']);
   const allTerminal = results.length >= 2 && results.every((r) => terminal.has(r.status));
   const stillInFlight = results.some((r) => r.status === 'running' || r.status === 'queued');
   if (!stillInFlight && allTerminal) {

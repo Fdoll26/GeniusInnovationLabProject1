@@ -49,38 +49,40 @@ const runs = new Map<string, RunRow>();
 const steps = new Map<string, StepRow[]>();
 const stepUpsertCalls: Array<{ runId: string; stepIndex: number; status: string }> = [];
 
+const twoStepPlan = {
+  version: '1.0',
+  refined_topic: 'topic',
+  assumptions: ['a1'],
+  total_budget: { max_steps: 2, max_sources: 8, max_tokens: 2000 },
+  steps: [
+    {
+      step_index: 0,
+      step_type: 'DEVELOP_RESEARCH_PLAN',
+      title: 'Plan',
+      objective: 'Create a plan',
+      target_source_types: ['government'],
+      search_query_pack: ['topic'],
+      budgets: { max_sources: 3, max_tokens: 1000, max_minutes: 5 },
+      deliverables: ['Plan JSON'],
+      done_definition: ['done']
+    },
+    {
+      step_index: 1,
+      step_type: 'DISCOVER_SOURCES_WITH_PLAN',
+      title: 'Discover',
+      objective: 'Find sources',
+      target_source_types: ['news'],
+      search_query_pack: ['topic data'],
+      budgets: { max_sources: 5, max_tokens: 1000, max_minutes: 8 },
+      deliverables: ['Source list'],
+      done_definition: ['done']
+    }
+  ],
+  deliverables: ['report']
+};
+
 const runOpenAiReasoningStep = vi.fn(async () => ({
-  text: JSON.stringify({
-    version: '1.0',
-    refined_topic: 'topic',
-    assumptions: ['a1'],
-    total_budget: { max_steps: 2, max_sources: 8, max_tokens: 2000 },
-    steps: [
-      {
-        step_index: 0,
-        step_type: 'DEVELOP_RESEARCH_PLAN',
-        title: 'Plan',
-        objective: 'Create a plan',
-        target_source_types: ['government'],
-        search_query_pack: ['topic'],
-        budgets: { max_sources: 3, max_tokens: 1000, max_minutes: 5 },
-        deliverables: ['Plan JSON'],
-        done_definition: ['done']
-      },
-      {
-        step_index: 1,
-        step_type: 'DISCOVER_SOURCES_WITH_PLAN',
-        title: 'Discover',
-        objective: 'Find sources',
-        target_source_types: ['news'],
-        search_query_pack: ['topic data'],
-        budgets: { max_sources: 5, max_tokens: 1000, max_minutes: 8 },
-        deliverables: ['Source list'],
-        done_definition: ['done']
-      }
-    ],
-    deliverables: ['report']
-  }),
+  text: JSON.stringify(twoStepPlan),
   responseId: 'oa-1',
   usage: null,
   primaryContent: {
@@ -109,37 +111,7 @@ const startResearchJob = vi.fn(async () => ({
 }));
 
 const runGeminiReasoningStep = vi.fn(async () => ({
-  text: JSON.stringify({
-    version: '1.0',
-    refined_topic: 'topic',
-    assumptions: ['a1'],
-    total_budget: { max_steps: 2, max_sources: 8, max_tokens: 2000 },
-    steps: [
-      {
-        step_index: 0,
-        step_type: 'DEVELOP_RESEARCH_PLAN',
-        title: 'Plan',
-        objective: 'Create a plan',
-        target_source_types: ['government'],
-        search_query_pack: ['topic'],
-        budgets: { max_sources: 3, max_tokens: 1000, max_minutes: 5 },
-        deliverables: ['Plan JSON'],
-        done_definition: ['done']
-      },
-      {
-        step_index: 1,
-        step_type: 'DISCOVER_SOURCES_WITH_PLAN',
-        title: 'Discover',
-        objective: 'Find sources',
-        target_source_types: ['news'],
-        search_query_pack: ['topic data'],
-        budgets: { max_sources: 5, max_tokens: 1000, max_minutes: 8 },
-        deliverables: ['Source list'],
-        done_definition: ['done']
-      }
-    ],
-    deliverables: ['report']
-  }),
+  text: JSON.stringify(twoStepPlan),
   sources: null,
   usage: null,
   groundingMetadata: {
@@ -278,8 +250,8 @@ function seedRun(provider: Provider): string {
     assumptions_json: null,
     clarifications_json: null,
     research_brief_json: null,
-    research_plan_json: null,
-    progress_json: { step_id: null, step_index: 0, total_steps: 8, step_label: null, gap_loops: 0 },
+    research_plan_json: twoStepPlan,
+    progress_json: { step_id: null, step_index: 0, total_steps: 2, step_label: null, gap_loops: 0 },
     current_step_index: 0,
     max_steps: 8,
     target_sources_per_step: 5,
@@ -317,7 +289,8 @@ describe('step execution engine integration', () => {
       expect(afterFirst.find((row) => row.step_index === 0)?.status).toBe('done');
 
       const secondTick = await tick(runId);
-      expect(secondTick.done).toBe(false);
+      expect(secondTick.done).toBe(true);
+      expect(secondTick.state).toBe('DONE');
       expect(runs.get(runId)?.current_step_index).toBe(2);
       const afterSecond = steps.get(runId) ?? [];
       expect(afterSecond.find((row) => row.step_index === 1)?.status).toBe('done');

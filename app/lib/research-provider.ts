@@ -7,6 +7,7 @@ import {
   startResearchJob
 } from './openai-client';
 import { getResearchProviderConfig } from './research-config';
+import { normalizeProviderCitations } from './citation-normalizer';
 import {
   buildFallbackResearchPlan,
   parseResearchPlanFromText,
@@ -209,7 +210,7 @@ async function runFastReasoning(params: {
     return {
       text: out.text,
       usage: out.usage ?? null,
-      rawSources: null,
+      rawSources: out.sources ?? null,
       providerNativeOutput: out.primaryContent?.text ?? out.text,
       providerNativeCitationMetadata: out.primaryContent?.annotations ?? null
     };
@@ -384,8 +385,14 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
         });
 
   const rawText = runResult.text.trim();
+  const normalized = normalizeProviderCitations({
+    provider: input.provider,
+    text: runResult.providerNativeOutput ?? rawText,
+    citationMetadata: runResult.providerNativeCitationMetadata ?? null,
+    sources: runResult.rawSources ?? null
+  });
   const citations = normalizeCitations(input.provider, rawText, runResult.rawSources, input.maxCandidates);
-  let evidence = evidenceFromText(rawText, citations);
+  let evidence = evidenceFromText(normalized.outputTextWithRefs || rawText, citations);
   let structuredOutput: Record<string, unknown> | null = null;
   let updatedPlan: ResearchPlan | null = null;
 
@@ -460,8 +467,13 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
   return {
     step_goal: `Execute ${input.stepType.replace(/_/g, ' ').toLowerCase()}`,
     inputs_summary: compactSummary(`${input.stepType} | sourceTarget=${input.sourceTarget} | maxTokens=${outputTokens}`),
-    raw_output_text: rawText,
+    raw_output_text: normalized.outputTextWithRefs || rawText,
+    output_text_with_refs: normalized.outputTextWithRefs || rawText,
+    references: normalized.references,
     citations,
+    consulted_sources: Array.isArray((runResult.rawSources as Record<string, unknown> | null)?.web_search_call_sources)
+      ? ((runResult.rawSources as { web_search_call_sources: Array<{ url: string; title?: string | null }> }).web_search_call_sources ?? [])
+      : [],
     provider_native_output: runResult.providerNativeOutput ?? rawText,
     provider_native_citation_metadata: runResult.providerNativeCitationMetadata ?? null,
     evidence,

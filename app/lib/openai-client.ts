@@ -568,7 +568,45 @@ export function getResponsePrimaryMessageContent(data: unknown): { text: string;
 }
 
 export function getResponseSources(data: unknown): unknown {
-  return (data as { sources?: unknown }).sources;
+  const topLevel = (data as { sources?: unknown }).sources ?? null;
+  const consulted = getResponseWebSearchCallSources(data);
+  if (consulted.length === 0) return topLevel;
+  return {
+    response_sources: topLevel,
+    web_search_call_sources: consulted
+  };
+}
+
+export function getResponseWebSearchCallSources(data: unknown): Array<{ url: string; title?: string | null }> {
+  const out: Array<{ url: string; title?: string | null }> = [];
+  const seen = new Set<string>();
+  const output = (data as { output?: unknown[] })?.output;
+  if (!Array.isArray(output)) return out;
+
+  for (const item of output) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    if (rec.type !== 'web_search_call') continue;
+    const action = rec.action;
+    if (!action || typeof action !== 'object') continue;
+    const sources = (action as Record<string, unknown>).sources;
+    if (!Array.isArray(sources)) continue;
+    for (const source of sources) {
+      if (!source || typeof source !== 'object') continue;
+      const src = source as Record<string, unknown>;
+      const rawUrl =
+        (typeof src.url === 'string' && src.url) ||
+        (typeof src.uri === 'string' && src.uri) ||
+        (typeof src.href === 'string' && src.href) ||
+        null;
+      if (!rawUrl || !/^https?:\/\//i.test(rawUrl)) continue;
+      const url = rawUrl.replace(/[.,;:!?]+$/, '');
+      if (seen.has(url)) continue;
+      seen.add(url);
+      out.push({ url, title: typeof src.title === 'string' ? src.title : null });
+    }
+  }
+  return out;
 }
 
 function parseRefinementOutput(text: string): { questions: string[] } {
@@ -894,6 +932,7 @@ function buildDeepResearchBody(
     input,
     tools: [{ type: 'web_search_preview' }],
     tool_choice: 'auto',
+    include: ['web_search_call.action.sources'],
     max_tool_calls: maxToolCalls,
     ...(reasoning ? { reasoning } : {})
   } as const;
@@ -1057,6 +1096,7 @@ export async function runOpenAiReasoningStep(params: {
   responseId: string | null;
   usage?: unknown;
   primaryContent?: { text: string; annotations: unknown };
+  sources?: unknown;
 }> {
   const body: Record<string, unknown> = {
     model: params.model || refinerModel,
@@ -1077,6 +1117,7 @@ export async function runOpenAiReasoningStep(params: {
   if (params.useWebSearch ?? true) {
     body.tools = [{ type: 'web_search_preview' }];
     body.tool_choice = 'auto';
+    body.include = ['web_search_call.action.sources'];
   }
 
   const data = await request(
@@ -1092,6 +1133,7 @@ export async function runOpenAiReasoningStep(params: {
     text: (primary?.text ?? extractOutputText(data)).trim(),
     responseId: typeof typed.id === 'string' ? typed.id : null,
     usage: typed.usage,
+    sources: getResponseSources(data),
     ...(primary ? { primaryContent: primary } : {})
   };
 }

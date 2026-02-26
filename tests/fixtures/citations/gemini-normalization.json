@@ -1,0 +1,35 @@
+{
+  "text": "Gamma claim. Delta claim.",
+  "groundingMetadata": {
+    "groundingChunks": [
+      {
+        "web": {
+          "uri": "https://gamma.example/paper",
+          "title": "Gamma Paper"
+        }
+      },
+      {
+        "web": {
+          "uri": "https://delta.example/data",
+          "title": "Delta Data"
+        }
+      }
+    ],
+    "groundingSupports": [
+      {
+        "segment": {
+          "startIndex": 0,
+          "endIndex": 12
+        },
+        "groundingChunkIndices": [0]
+      },
+      {
+        "segment": {
+          "startIndex": 13,
+          "endIndex": 24
+        },
+        "groundingChunkIndices": [1]
+      }
+    ]
+  }
+}

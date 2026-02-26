@@ -1,0 +1,25 @@
+{
+  "text": "Alpha finding. Beta finding.",
+  "annotations": [
+    {
+      "type": "url_citation",
+      "start_index": 0,
+      "end_index": 14,
+      "url": "https://alpha.example/source",
+      "title": "Alpha Source"
+    },
+    {
+      "type": "url_citation",
+      "start_index": 15,
+      "end_index": 27,
+      "source_id": "src_beta"
+    }
+  ],
+  "sources": [
+    {
+      "id": "src_beta",
+      "url": "https://beta.example/report",
+      "title": "Beta Report"
+    }
+  ]
+}

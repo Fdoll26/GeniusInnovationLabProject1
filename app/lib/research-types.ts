@@ -77,7 +77,10 @@ export type ResearchStepArtifact = {
   step_goal: string;
   inputs_summary: string;
   raw_output_text: string;
+  output_text_with_refs?: string;
+  references?: Array<{ n: number; url: string; title?: string | null }>;
   citations: ResearchCitation[];
+  consulted_sources?: Array<{ url: string; title?: string | null }>;
   provider_native_output?: string | null;
   provider_native_citation_metadata?: unknown;
   evidence: ResearchEvidence[];

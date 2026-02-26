@@ -34,6 +34,34 @@ function parseJson<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
+function getExecutionStepSequence(run: NonNullable<Awaited<ReturnType<typeof getResearchRunById>>>): Array<(typeof STEP_SEQUENCE)[number]> {
+  const fallback = STEP_SEQUENCE.slice(0, clamp(run.max_steps, 1, STEP_SEQUENCE.length));
+  const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
+  if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
+    return fallback;
+  }
+
+  const ordered = [...plan.steps]
+    .filter(
+      (step): step is ResearchPlan['steps'][number] =>
+        Boolean(step) && typeof step === 'object' && typeof step.step_type === 'string' && STEP_SEQUENCE.includes(step.step_type)
+    )
+    .sort((a, b) => a.step_index - b.step_index);
+
+  if (ordered.length === 0) {
+    return fallback;
+  }
+
+  const deduped: Array<(typeof STEP_SEQUENCE)[number]> = [];
+  for (const step of ordered) {
+    if (!deduped.includes(step.step_type)) {
+      deduped.push(step.step_type);
+    }
+  }
+
+  return deduped.length > 0 ? deduped : fallback;
+}
+
 function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
@@ -191,12 +219,15 @@ async function executePlannedStep(params: {
     outputExcerpt: artifact.raw_output_text.slice(0, 700),
     sources: artifact.citations as unknown as Array<Record<string, unknown>>,
     evidence: artifact.evidence as unknown as Array<Record<string, unknown>>,
-    citationMap: [],
+    citationMap: (artifact.references ?? []) as unknown as Array<Record<string, unknown>>,
     nextStepProposal: artifact.next_step_hint,
     tokenUsage: artifact.token_usage as Record<string, unknown> | null,
     providerNative: {
       output_text: artifact.provider_native_output ?? artifact.raw_output_text,
-      citation_metadata: artifact.provider_native_citation_metadata ?? null
+      citation_metadata: artifact.provider_native_citation_metadata ?? null,
+      output_text_with_refs: artifact.output_text_with_refs ?? artifact.raw_output_text,
+      references: artifact.references ?? [],
+      consulted_sources: artifact.consulted_sources ?? []
     },
     completed: true
   });
@@ -291,7 +322,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
   }
   const settings = await getUserSettings(session.user_id);
   const providerCfg = getResearchProviderConfig(run.provider);
-  const totalSteps = STEP_SEQUENCE.length;
+  const executionSteps = getExecutionStepSequence(run);
+  const totalSteps = executionSteps.length;
 
   let currentIndex = clamp(run.current_step_index, 0, totalSteps);
   if (currentIndex >= totalSteps) {
@@ -310,16 +342,16 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         runId,
         currentStepIndex: currentIndex - 1,
         progress: {
-          step_id: STEP_SEQUENCE[currentIndex - 1],
+          step_id: executionSteps[currentIndex - 1],
           step_index: currentIndex - 1,
           total_steps: totalSteps,
-          step_label: STEP_LABELS[STEP_SEQUENCE[currentIndex - 1]]
+          step_label: STEP_LABELS[executionSteps[currentIndex - 1]]
         }
       });
       return { state: 'IN_PROGRESS', done: false };
     }
-    const fromStep = STEP_SEQUENCE[currentIndex - 1];
-    const toStep = STEP_SEQUENCE[currentIndex];
+    const fromStep = executionSteps[currentIndex - 1];
+    const toStep = executionSteps[currentIndex];
     if (!canTransitionStep(fromStep, toStep)) {
       await updateResearchRun({
         runId,
@@ -338,10 +370,10 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       runId,
       currentStepIndex: currentIndex,
       progress: {
-        step_id: currentIndex < totalSteps ? STEP_SEQUENCE[currentIndex] : null,
+        step_id: currentIndex < totalSteps ? executionSteps[currentIndex] : null,
         step_index: currentIndex,
         total_steps: totalSteps,
-        step_label: currentIndex < totalSteps ? STEP_LABELS[STEP_SEQUENCE[currentIndex]] : null
+        step_label: currentIndex < totalSteps ? STEP_LABELS[executionSteps[currentIndex]] : null
       }
     });
     if (currentIndex >= totalSteps) {
@@ -350,7 +382,7 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
     }
   }
 
-  const stepId = STEP_SEQUENCE[currentIndex];
+  const stepId = executionSteps[currentIndex];
   try {
     const execution = await executePlannedStep({
       runId,
@@ -380,10 +412,10 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
           runId,
           currentStepIndex: 1,
           progress: {
-            step_id: STEP_SEQUENCE[1],
+            step_id: executionSteps[1],
             step_index: 1,
             total_steps: totalSteps,
-            step_label: STEP_LABELS[STEP_SEQUENCE[1]],
+            step_label: STEP_LABELS[executionSteps[1]],
             gap_loops: currentLoops + 1
           }
         });
@@ -397,15 +429,18 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       runId,
       currentStepIndex: nextIndex,
       progress: {
-        step_id: isDone ? null : STEP_SEQUENCE[nextIndex],
+        step_id: isDone ? null : executionSteps[nextIndex],
         step_index: nextIndex,
         total_steps: totalSteps,
-        step_label: isDone ? null : STEP_LABELS[STEP_SEQUENCE[nextIndex]],
+        step_label: isDone ? null : STEP_LABELS[executionSteps[nextIndex]],
         gap_loops: Number(progress.gap_loops ?? 0)
       },
       state: isDone ? 'DONE' : 'IN_PROGRESS',
-      synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? artifact.raw_output_text : undefined,
-      synthesizedSources: stepId === 'SECTION_SYNTHESIS' ? (artifact.citations as unknown as Array<Record<string, unknown>>) : undefined,
+      synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? artifact.output_text_with_refs ?? artifact.raw_output_text : undefined,
+      synthesizedSources:
+        stepId === 'SECTION_SYNTHESIS'
+          ? ((artifact.references ?? []) as unknown as Array<Record<string, unknown>>)
+          : undefined,
       completed: isDone
     });
 
