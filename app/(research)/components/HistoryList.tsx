@@ -34,13 +34,14 @@ export default function HistoryList({
   onDeleted?: (id: string) => void;
 }) {
   const [sessions, setSessions] = useState<SessionListItem[]>([]);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [hasMore, setHasMore] = useState(true);
   const [search, setSearch] = useState('');
   const [query, setQuery] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const pageSize = 10;
   const sessionsRef = useRef<SessionListItem[]>([]);
   const loadingRef = useRef(false);
@@ -53,13 +54,16 @@ export default function HistoryList({
     }
     loadingRef.current = true;
     setLoading(true);
+    setLoadError(null);
     const seq = ++requestSeqRef.current;
     const offset = sessionsRef.current.length;
     const response = await fetch(
-      `/api/research/sessions?limit=${pageSize}&offset=${offset}&q=${encodeURIComponent(query)}`
+      `/api/research/sessions?limit=${pageSize}&offset=${offset}&q=${encodeURIComponent(query)}`,
+      { cache: 'no-store' }
     );
     if (!response.ok) {
       if (seq === requestSeqRef.current) {
+        setLoadError(`Failed to load sessions (${response.status}).`);
         setLoading(false);
         loadingRef.current = false;
       }
@@ -146,7 +150,10 @@ export default function HistoryList({
           placeholder="Search topic, refined prompt, or status"
         />
       </label>
-      {sessions.length === 0 ? (
+      {loadError ? <p role="alert">{loadError}</p> : null}
+      {sessions.length === 0 && loading ? (
+        <p>Loading sessions...</p>
+      ) : sessions.length === 0 ? (
         <p>No sessions yet.</p>
       ) : (
         sessions.map((session) => (
