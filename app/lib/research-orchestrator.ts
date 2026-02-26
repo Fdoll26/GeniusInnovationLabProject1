@@ -94,6 +94,21 @@ function summarizePriorSteps(steps: Awaited<ReturnType<typeof listResearchSteps>
     .join('\n');
 }
 
+function chunkTextForStorage(text: string, maxChars = 4000): Array<{ index: number; text: string }> {
+  const trimmed = text.trim();
+  if (!trimmed) return [];
+  const chunks: Array<{ index: number; text: string }> = [];
+  let cursor = 0;
+  let index = 0;
+  while (cursor < trimmed.length) {
+    const next = Math.min(trimmed.length, cursor + maxChars);
+    chunks.push({ index, text: trimmed.slice(cursor, next) });
+    cursor = next;
+    index += 1;
+  }
+  return chunks;
+}
+
 async function persistStepArtifacts(params: {
   runId: string;
   stepId: string;
@@ -149,11 +164,15 @@ async function executePlannedStep(params: {
     timeoutMs: (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
     plan,
     priorStepSummary: summarizePriorSteps(stepsNow),
-    sourceTarget: clamp(run.target_sources_per_step, 1, 30),
+    sourceTarget: clamp(run.target_sources_per_step, 1, run.provider === 'gemini' ? 100 : 30),
     maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
     maxCandidates: providerCfg.max_candidates,
     shortlistSize: providerCfg.shortlist_size
   });
+  const geminiOutputChunks =
+    run.provider === 'gemini'
+      ? chunkTextForStorage((artifact.provider_native_output ?? artifact.raw_output_text ?? '').trim())
+      : [];
   const completedStep = await upsertResearchStep({
     runId,
     stepIndex: currentIndex,
@@ -177,7 +196,28 @@ async function executePlannedStep(params: {
       citation_metadata: artifact.provider_native_citation_metadata ?? null,
       output_text_with_refs: artifact.output_text_with_refs ?? artifact.raw_output_text,
       references: artifact.references ?? [],
-      consulted_sources: artifact.consulted_sources ?? []
+      consulted_sources: artifact.consulted_sources ?? [],
+      ...(run.provider === 'gemini'
+        ? {
+            gemini_output_chunks: geminiOutputChunks,
+            gemini_output_chunk_count: geminiOutputChunks.length
+          }
+        : {}),
+      ...(artifact.gemini_subcall_results
+        ? {
+            gemini_subcall_results: artifact.gemini_subcall_results
+          }
+        : {}),
+      ...(artifact.gemini_coverage_metrics
+        ? {
+            gemini_coverage_metrics: artifact.gemini_coverage_metrics
+          }
+        : {}),
+      ...(artifact.gemini_ranked_sources
+        ? {
+            gemini_ranked_sources: artifact.gemini_ranked_sources
+          }
+        : {})
     },
     completed: true
   });
@@ -202,7 +242,7 @@ export async function startRun(params: {
     depth: settings.research_depth,
     question: params.question,
     maxSteps: STEP_SEQUENCE.length,
-    targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, 25),
+    targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
     maxTotalSources: clamp(settings.research_max_total_sources, 5, 400),
     maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
     minWordCount: defaultWordTarget(settings.research_depth)
@@ -213,7 +253,7 @@ export async function startRun(params: {
     question: params.question,
     depth: settings.research_depth,
     maxSteps: STEP_SEQUENCE.length,
-    targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, 25),
+    targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
     maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
     timeoutMs: (params.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000
   });
@@ -376,6 +416,19 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
     if (stepId === 'SECTION_SYNTHESIS' && !synthesizedText) {
       throw new Error('Empty synthesis output from provider');
     }
+    const synthesizedSources: Array<Record<string, unknown>> =
+      stepId === 'SECTION_SYNTHESIS'
+        ? run.provider === 'gemini' && artifact.gemini_ranked_sources && artifact.gemini_ranked_sources.length > 0
+          ? artifact.gemini_ranked_sources.map((s, idx) => ({
+              index: idx + 1,
+              url: s.url,
+              title: s.title ?? s.domain ?? s.url,
+              domain: s.domain,
+              supportCount: s.supportCount,
+              avgConfidence: s.avgConfidence
+            }))
+          : ((artifact.references ?? []) as unknown as Array<Record<string, unknown>>)
+        : [];
     await updateResearchRun({
       runId,
       currentStepIndex: nextIndex,
@@ -388,10 +441,7 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       },
       state: isDone ? 'DONE' : 'IN_PROGRESS',
       synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? synthesizedText : undefined,
-      synthesizedSources:
-        stepId === 'SECTION_SYNTHESIS'
-          ? ((artifact.references ?? []) as unknown as Array<Record<string, unknown>>)
-          : undefined,
+      synthesizedSources: stepId === 'SECTION_SYNTHESIS' ? synthesizedSources : undefined,
       completed: isDone
     });
 

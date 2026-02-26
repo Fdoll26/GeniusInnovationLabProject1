@@ -49,6 +49,18 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
     const progress = (run.progress_json && typeof run.progress_json === 'object'
       ? run.progress_json
       : null) as Record<string, unknown> | null;
+    const activeStepIndex =
+      progress && typeof progress.step_index === 'number' && Number.isFinite(progress.step_index)
+        ? Math.max(0, Math.trunc(progress.step_index))
+        : Math.max(0, run.current_step_index);
+    const normalizedSteps = entry.steps.map((step: any) => ({ ...step }));
+    const hasRunning = normalizedSteps.some((step: any) => step.status === 'running');
+    if (run.state === 'IN_PROGRESS' && !hasRunning) {
+      const target = normalizedSteps.find((step: any) => Number(step.step_index) === activeStepIndex);
+      if (target && target.status !== 'done' && target.status !== 'failed') {
+        target.status = 'running';
+      }
+    }
     return {
       provider,
       runId: run.id,
@@ -64,7 +76,7 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
             totalSteps: typeof progress.total_steps === 'number' ? progress.total_steps : run.max_steps
           }
         : null,
-      steps: entry.steps.map((step: any) => ({
+      steps: normalizedSteps.map((step: any) => ({
         id: step.id,
         stepIndex: step.step_index,
         stepType: step.step_type,

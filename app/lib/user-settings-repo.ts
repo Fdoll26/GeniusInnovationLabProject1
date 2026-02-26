@@ -90,7 +90,7 @@ export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate
   const summarizeProvider = coerceProvider(obj.summarize_provider);
   if (summarizeProvider) normalized.summarize_provider = summarizeProvider;
 
-  const maxSources = clampInt(obj.max_sources, 1, 50);
+  const maxSources = clampInt(obj.max_sources, 1, 100);
   if (maxSources !== null) normalized.max_sources = maxSources;
 
   const openaiTimeout = clampInt(obj.openai_timeout_minutes, 1, 20);
@@ -124,7 +124,7 @@ export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate
   const researchMaxSteps = clampInt(obj.research_max_steps, 3, 20);
   if (researchMaxSteps !== null) normalized.research_max_steps = researchMaxSteps;
 
-  const researchTargetSourcesPerStep = clampInt(obj.research_target_sources_per_step, 1, 20);
+  const researchTargetSourcesPerStep = clampInt(obj.research_target_sources_per_step, 1, 100);
   if (researchTargetSourcesPerStep !== null) normalized.research_target_sources_per_step = researchTargetSourcesPerStep;
 
   const researchMaxTotalSources = clampInt(obj.research_max_total_sources, 5, 300);

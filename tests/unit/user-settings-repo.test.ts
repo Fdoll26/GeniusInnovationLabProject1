@@ -24,7 +24,7 @@ describe('normalizeUserSettingsUpdate', () => {
     expect(result).toEqual({
       refine_provider: 'gemini',
       summarize_provider: 'openai',
-      max_sources: 50,
+      max_sources: 100,
       openai_timeout_minutes: 1,
       gemini_timeout_minutes: 3,
       reasoning_level: 'high',

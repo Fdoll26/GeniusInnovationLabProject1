@@ -18,6 +18,7 @@ export default function HomePageClient() {
   const { data: session, status } = useSession();
   const router = useRouter();
   const params = useSearchParams();
+  const sessionIdFromUrl = params.get('session');
   const [activeSessions, setActiveSessions] = useState<ActiveSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [debugBypass, setDebugBypass] = useState(false);
@@ -80,7 +81,7 @@ export default function HomePageClient() {
         const { sessions: nextSessions, activeId: nextActive } = await restoreActiveSessions({
           storedSessions,
           storedActiveId,
-          urlSessionId: params.get('session'),
+          urlSessionId: sessionIdFromUrl,
           serverList,
           fetchSessionById: async (id: string) => {
             const response = await fetch(`/api/research/sessions/${encodeURIComponent(id)}`);
@@ -101,7 +102,7 @@ export default function HomePageClient() {
     return () => {
       active = false;
     };
-  }, [status, debugBypass, session?.user?.email, params]);
+  }, [status, debugBypass, session?.user?.email, sessionIdFromUrl]);
 
   const canStartNew = useMemo(() => activeSessions.length < 3, [activeSessions.length]);
 
@@ -127,12 +128,12 @@ export default function HomePageClient() {
   };
 
   useEffect(() => {
-    const fromUrl = params.get('session');
+    const fromUrl = sessionIdFromUrl;
     if (fromUrl) {
       void ensureSessionLoaded(fromUrl);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [params]);
+  }, [sessionIdFromUrl]);
 
   const removeAfterComplete = (sessionId: string) => {
     const nextSessions = activeSessionsRef.current.filter((s) => s.id !== sessionId);
@@ -225,4 +226,3 @@ export default function HomePageClient() {
     </div>
   );
 }
-

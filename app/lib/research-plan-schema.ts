@@ -42,7 +42,7 @@ function normalizePlanStep(input: unknown, defaults: { index: number; sourceTarg
   const stepType = STEP_SEQUENCE.includes(rawStepType as (typeof STEP_SEQUENCE)[number])
     ? (rawStepType as (typeof STEP_SEQUENCE)[number])
     : STEP_SEQUENCE[Math.min(idx, STEP_SEQUENCE.length - 1)];
-  const queries = asTextArray(typed.search_query_pack, 10);
+  const queries = asTextArray(typed.search_query_pack, 18);
   const deliverables = asTextArray(typed.deliverables, 10);
 
   return {
@@ -95,7 +95,7 @@ export const RESEARCH_PLAN_STEP_SCHEMA: Record<string, unknown> = {
     search_query_pack: {
       type: 'array',
       minItems: 1,
-      maxItems: 10,
+      maxItems: 18,
       items: { type: 'string', minLength: 3, maxLength: 220 }
     },
     budgets: {

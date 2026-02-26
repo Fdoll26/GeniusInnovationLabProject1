@@ -1,4 +1,9 @@
-import { extractGeminiGroundingMetadata, runGemini, runGeminiReasoningStep } from './gemini-client';
+import {
+  extractGeminiGroundingMetadata,
+  runGemini,
+  runGeminiReasoningStep,
+  runGeminiReasoningStepFanOut
+} from './gemini-client';
 import {
   getResponseOutputText,
   getResponsePrimaryMessageContent,
@@ -22,6 +27,7 @@ import type {
   ResearchStepArtifact,
   StepType
 } from './research-types';
+import type { GeminiCoverageMetrics, GeminiSubcallResult, RankedSource } from './gemini-client';
 
 type ExecutionInput = {
   provider: ResearchProviderName;
@@ -190,15 +196,25 @@ function evidenceFromText(text: string, citations: ResearchStepArtifact['citatio
 async function runFastReasoning(params: {
   provider: ResearchProviderName;
   prompt: string;
+  queryPack?: string[];
   timeoutMs: number;
   maxOutputTokens: number;
   model: string;
   useSearch?: boolean;
   structuredOutput?: {
     schemaName: string;
-    jsonSchema: Record<string, unknown>;
+      jsonSchema: Record<string, unknown>;
   };
-}) {
+}): Promise<{
+  text: string;
+  usage: unknown;
+  rawSources: unknown;
+  providerNativeOutput: string;
+  providerNativeCitationMetadata: unknown;
+  subcallResults?: GeminiSubcallResult[];
+  coverageMetrics?: GeminiCoverageMetrics;
+  rankedSources?: RankedSource[];
+}> {
   if (params.provider === 'openai') {
     const out = await runOpenAiReasoningStep({
       prompt: params.prompt,
@@ -217,6 +233,28 @@ async function runFastReasoning(params: {
     };
   }
 
+  if ((params.useSearch ?? true) && !params.structuredOutput) {
+    const out = await runGeminiReasoningStepFanOut({
+      prompt: params.prompt,
+      queryPack: params.queryPack ?? [],
+      timeoutMs: params.timeoutMs,
+      maxOutputTokens: params.maxOutputTokens,
+      model: params.model,
+      maxSubcalls: Math.min(30, params.queryPack?.length ?? 30),
+      maxParallelSubcalls: 6
+    });
+    return {
+      text: out.text,
+      usage: out.usage ?? null,
+      rawSources: out.sources ?? null,
+      providerNativeOutput: out.text,
+      providerNativeCitationMetadata: (out.sources as { groundingMetadata?: unknown } | null)?.groundingMetadata ?? null,
+      subcallResults: out.subcallResults,
+      coverageMetrics: out.coverageMetrics,
+      rankedSources: out.rankedSources
+    };
+  }
+
   const out = await runGeminiReasoningStep({
     prompt: params.prompt,
     timeoutMs: params.timeoutMs,
@@ -225,6 +263,7 @@ async function runFastReasoning(params: {
     useSearch: params.useSearch ?? true,
     structuredOutput: params.structuredOutput
   });
+
   return {
     text: out.text,
     usage: out.usage ?? null,
@@ -286,6 +325,285 @@ function compactSummary(text: string, maxChars = 800): string {
   return `${t.slice(0, maxChars)}...`;
 }
 
+function buildDefaultQueryPack(
+  stepType: Exclude<StepType, 'NATIVE_SECTION'>,
+  question: string,
+  priorSummary: string,
+  provider: ResearchProviderName = 'openai'
+): string[] {
+  const q = question.trim();
+  const priorHint = priorSummary.trim().slice(0, 160);
+
+  // OpenAI path: keep existing compact packs (OpenAI handles search internally)
+  if (provider === 'openai') {
+    if (stepType === 'DISCOVER_SOURCES_WITH_PLAN') {
+      return [
+        `${q} primary sources overview`,
+        `${q} academic research papers`,
+        `${q} government reports statistics`,
+        `${q} industry reports market analysis`,
+        `${q} reputable journalism latest developments`,
+        `${q} expert analysis recent`,
+        `${q} criticisms limitations concerns`,
+        `${q} case studies examples`,
+        `${q} historical baseline trends`,
+        `${q} conflicting evidence debate`
+      ];
+    }
+    if (stepType === 'DEEP_READ') {
+      return [
+        `${q} key metrics and quantitative findings`,
+        `${q} methodology quality and assumptions`,
+        `${q} regional differences comparison`,
+        `${q} policy and regulatory impacts`,
+        `${q} timeline milestones and forecasts`,
+        `${q} counterarguments and limitations`,
+        `${q} source credibility and evidence strength`,
+        `${q} failure cases and edge conditions`
+      ];
+    }
+    if (stepType === 'COUNTERPOINTS') {
+      return [
+        `${q} strongest criticisms`,
+        `${q} contradictory findings`,
+        `${q} alternative explanations`,
+        `${q} methodological weaknesses`,
+        `${q} conflicts of interest bias`,
+        `${q} downside risks scenario analysis`,
+        `${q} expert disagreement`,
+        `${q} replication concerns`
+      ];
+    }
+    if (stepType === 'SECTION_SYNTHESIS') {
+      return [
+        `${q} cross-source synthesis key takeaways`,
+        `${q} consensus findings`,
+        `${q} unresolved disagreements`,
+        `${q} practical implications`,
+        `${q} caveats and uncertainty`,
+        `${q} data gaps and next research steps`
+      ];
+    }
+    if (stepType === 'SHORTLIST_RESULTS') {
+      return [
+        `${q} most authoritative sources`,
+        `${q} primary data sources`,
+        `${q} highest quality peer reviewed evidence`,
+        `${q} government and regulatory sources`,
+        `${q} reputable journalism and explainers`,
+        `${q} opposing viewpoints`
+      ];
+    }
+    if (stepType === 'EXTRACT_EVIDENCE') {
+      return [
+        `${q} concrete statistics and figures`,
+        `${q} named organizations and reports`,
+        `${q} dated claims and timelines`,
+        `${q} causal claims with supporting data`,
+        `${q} contradictory evidence`,
+        `${q} limitations caveats uncertainty`
+      ];
+    }
+    if (stepType === 'GAP_CHECK') {
+      return [
+        `${q} missing evidence`,
+        `${q} unsupported claims`,
+        `${q} missing primary sources`,
+        `${q} unresolved contradictions`,
+        `${q} follow-up research questions`,
+        `${q} unknowns and limitations`
+      ];
+    }
+    if (stepType === 'DEVELOP_RESEARCH_PLAN') {
+      return [
+        `${q} scope and definitions`,
+        `${q} key dimensions and sections`,
+        `${q} primary source strategy`,
+        `${q} opposing perspectives and critiques`,
+        `${q} baseline metrics and datasets`,
+        `${q} recency and trend indicators`,
+        `${q} if prior findings then ${priorHint || 'none'}`
+      ];
+    }
+    return [`${q} overview`, `${q} primary sources`, `${q} criticisms`, `${q} recent updates`];
+  }
+
+  if (stepType === 'DISCOVER_SOURCES_WITH_PLAN') {
+    return [
+      `${q} overview introduction`,
+      `${q} academic research peer reviewed studies`,
+      `${q} government agency reports official data`,
+      `${q} industry analysis market research`,
+      `${q} investigative journalism coverage`,
+      `${q} expert commentary analysis`,
+      `${q} NGO nonprofit research findings`,
+      `${q} historical trends baseline data`,
+      `${q} recent developments 2023 2024`,
+      `${q} case studies real world examples`,
+      `${q} criticisms limitations problems`,
+      `${q} international comparison global perspective`,
+      `${q} statistical data datasets numbers`,
+      `${q} policy regulatory framework`,
+      `${q} future outlook projections forecasts`,
+      `${q} opposing viewpoints debate controversy`,
+      `${q} key definitions terminology explained`,
+      `${q} primary source documents white papers`
+    ];
+  }
+
+  if (stepType === 'DEEP_READ') {
+    return [
+      `${q} quantitative findings key metrics`,
+      `${q} methodology research design quality`,
+      `${q} sample size confidence intervals statistical significance`,
+      `${q} longitudinal data time series trends`,
+      `${q} regional geographic breakdown differences`,
+      `${q} demographic breakdown population groups`,
+      `${q} causal mechanisms explanations why`,
+      `${q} policy regulatory impacts implications`,
+      `${q} cost benefit economic analysis`,
+      `${q} implementation challenges barriers`,
+      `${q} success cases best practices`,
+      `${q} failure cases edge conditions limitations`,
+      `${q} expert practitioner perspectives quotes`,
+      `${q} conflicting studies contradictory evidence`,
+      `${q} replication reproducibility concerns`,
+      `${q} confounding variables alternative explanations`,
+      `${q} data source reliability credibility`,
+      `${q} most cited foundational papers`
+    ];
+  }
+
+  if (stepType === 'COUNTERPOINTS') {
+    return [
+      `${q} strongest criticisms arguments against`,
+      `${q} methodological flaws limitations`,
+      `${q} contradictory studies contradicting evidence`,
+      `${q} alternative explanations competing theories`,
+      `${q} conflicts of interest funding bias`,
+      `${q} cherry picking selection bias`,
+      `${q} publication bias missing negative results`,
+      `${q} expert disagreement dissenting voices`,
+      `${q} failed implementations negative outcomes`,
+      `${q} unintended consequences side effects`,
+      `${q} cost and resource objections`,
+      `${q} feasibility scalability concerns`,
+      `${q} ethical objections moral concerns`,
+      `${q} political opposition resistance`,
+      `${q} market failure counterexamples`,
+      `${q} replication crisis failed replications`,
+      `${q} downside risks worst case scenarios`,
+      `${q} minority perspective underrepresented critique`
+    ];
+  }
+
+  if (stepType === 'SECTION_SYNTHESIS') {
+    return [
+      `${q} consensus expert agreement findings`,
+      `${q} evidence strength quality assessment`,
+      `${q} key takeaways practical implications`,
+      `${q} unresolved debates open questions`,
+      `${q} highest confidence findings`,
+      `${q} contested claims disputed evidence`,
+      `${q} data gaps missing information`,
+      `${q} synthesis overview combined findings`,
+      `${q} what experts agree on`,
+      `${q} what experts still disagree on`,
+      `${q} recommended actions next steps`,
+      `${q} future research directions needed`,
+      `${q} caveats limitations uncertainty`,
+      `${q} real world applications outcomes`,
+      `${q} cross disciplinary perspectives`,
+      `${q} short term vs long term implications`
+    ];
+  }
+
+  if (stepType === 'SHORTLIST_RESULTS') {
+    return [
+      `${q} authoritative primary sources`,
+      `${q} most cited influential papers`,
+      `${q} government official reports`,
+      `${q} peer reviewed journal articles`,
+      `${q} reputable think tank research`,
+      `${q} leading academic institutions studies`,
+      `${q} reputable news investigations`,
+      `${q} industry association official positions`,
+      `${q} WHO UN agency reports`,
+      `${q} national statistics offices data`,
+      `${q} fact checked verified claims`,
+      `${q} most recent updates 2024`,
+      `${q} opposing authoritative viewpoints`,
+      `${q} foundational seminal works`
+    ];
+  }
+
+  if (stepType === 'EXTRACT_EVIDENCE') {
+    return [
+      `${q} specific statistics percentages numbers`,
+      `${q} named studies and reports with dates`,
+      `${q} concrete examples with outcomes`,
+      `${q} quotes from named experts researchers`,
+      `${q} causal claims supported by data`,
+      `${q} before and after comparisons`,
+      `${q} cost figures economic data`,
+      `${q} timeframes deadlines milestones`,
+      `${q} geographic specific regional data`,
+      `${q} contradictory evidence conflicting claims`,
+      `${q} limitations caveats qualifications`,
+      `${q} confidence levels uncertainty ranges`,
+      `${q} primary source direct evidence`,
+      `${q} secondary analysis interpretation`,
+      `${q} anecdotal evidence case reports`
+    ];
+  }
+
+  if (stepType === 'GAP_CHECK') {
+    return [
+      `${q} missing evidence unanswered questions`,
+      `${q} under-researched aspects blind spots`,
+      `${q} claims lacking primary sources`,
+      `${q} unverified assertions speculation`,
+      `${q} outdated information needs update`,
+      `${q} geographic gaps understudied regions`,
+      `${q} demographic gaps underrepresented groups`,
+      `${q} long-term data longitudinal studies missing`,
+      `${q} contrarian perspectives not yet addressed`,
+      `${q} follow-up questions for further research`,
+      `${q} emerging developments not yet covered`,
+      `${q} practitioner perspectives missing`,
+      `${q} implementation evidence practice gap`
+    ];
+  }
+
+  if (stepType === 'DEVELOP_RESEARCH_PLAN') {
+    return [
+      `${q} key concepts definitions scope`,
+      `${q} main dimensions subtopics breakdown`,
+      `${q} primary data sources availability`,
+      `${q} academic literature overview`,
+      `${q} government and institutional sources`,
+      `${q} industry and market intelligence`,
+      `${q} counterarguments perspectives to include`,
+      `${q} current state of knowledge consensus`,
+      `${q} open debates controversies`,
+      `${q} geographic and temporal scope`,
+      `${q} relevant metrics and indicators`,
+      `${q} recent significant developments`,
+      `${q} seminal foundational work`,
+      `${q} if prior findings then ${priorHint || 'none'}`
+    ];
+  }
+
+  return [
+    `${q} overview`,
+    `${q} primary sources government academic`,
+    `${q} criticisms limitations`,
+    `${q} recent updates 2024`,
+    `${q} case studies examples`,
+    `${q} expert analysis commentary`
+  ];
+}
+
 function buildStepPrompt(input: ExecutionInput): { prompt: string; expectsJson: boolean } {
   const planText = input.plan ? JSON.stringify(input.plan).slice(0, 6000) : 'null';
   const base =
@@ -297,7 +615,15 @@ function buildStepPrompt(input: ExecutionInput): { prompt: string; expectsJson: 
     return {
       expectsJson: true,
       prompt:
-        `${base}\n\nReturn ONLY JSON matching this exact schema and plan all steps in execution order:\n` +
+        `${base}\n\nReturn ONLY JSON matching this exact schema and plan all steps in execution order.\n` +
+        `Each step's search_query_pack MUST contain 14-18 search queries that are:\n` +
+        `- Semantically diverse (synonyms, adjacent concepts, contrasting viewpoints)\n` +
+        `- Varied by source type: include queries targeting academic sources, government data, news, industry reports\n` +
+        `- Varied by perspective: include queries for supporting evidence AND criticisms/limitations\n` +
+        `- Specific enough to return actionable results when used as web search queries\n` +
+        `- Include at least 2 queries targeting non-English or non-US sources when globally relevant\n` +
+        `- Include at least 1 query with filetype or format bias (e.g. "PDF report", "white paper", "dataset")\n\n` +
+        `Schema:\n` +
         JSON.stringify(RESEARCH_PLAN_SCHEMA)
     };
   }
@@ -363,12 +689,32 @@ function buildStepPrompt(input: ExecutionInput): { prompt: string; expectsJson: 
   };
 }
 
-export async function executePipelineStep(input: ExecutionInput): Promise<ResearchStepArtifact & { updatedPlan?: ResearchPlan | null }> {
+export async function executePipelineStep(input: ExecutionInput): Promise<
+  ResearchStepArtifact & {
+    updatedPlan?: ResearchPlan | null;
+    gemini_subcall_results?: GeminiSubcallResult[];
+    gemini_coverage_metrics?: GeminiCoverageMetrics;
+    gemini_ranked_sources?: RankedSource[];
+  }
+> {
   const providerCfg = getResearchProviderConfig(input.provider);
   const stepCfg = providerCfg.steps[input.stepType];
   const model = stepCfg.model_tier === 'deep' ? providerCfg.deep_model : providerCfg.fast_model;
-  const outputTokens = Math.max(300, Math.min(input.maxOutputTokens, stepCfg.max_output_tokens));
+  const outputTokens = Math.max(
+    300,
+    Math.min(
+      input.provider === 'gemini' && stepCfg.model_tier !== 'deep'
+        ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 6000)
+        : input.maxOutputTokens,
+      stepCfg.max_output_tokens
+    )
+  );
   const promptDef = buildStepPrompt(input);
+  const currentPlanStep = input.plan?.steps?.find((s) => s.step_type === input.stepType);
+  const queryPack: string[] =
+    currentPlanStep?.search_query_pack?.length && Array.isArray(currentPlanStep.search_query_pack)
+      ? currentPlanStep.search_query_pack
+      : buildDefaultQueryPack(input.stepType, input.question, input.priorStepSummary, input.provider);
 
   const runResult =
     stepCfg.model_tier === 'deep'
@@ -386,6 +732,7 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
           maxOutputTokens: outputTokens,
           model,
           useSearch: true,
+          queryPack,
           structuredOutput:
             input.stepType === 'DEVELOP_RESEARCH_PLAN'
               ? {
@@ -474,6 +821,9 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
     input.stepType === 'GAP_CHECK' && structuredOutput && Array.isArray(structuredOutput.follow_up_queries)
       ? `follow_up_queries=${(structuredOutput.follow_up_queries as unknown[]).length}`
       : null;
+  const fanoutSubcallResults = 'subcallResults' in runResult ? runResult.subcallResults : undefined;
+  const fanoutCoverageMetrics = 'coverageMetrics' in runResult ? runResult.coverageMetrics : undefined;
+  const fanoutRankedSources = 'rankedSources' in runResult ? runResult.rankedSources : undefined;
 
   return {
     step_goal: `Execute ${input.stepType.replace(/_/g, ' ').toLowerCase()}`,
@@ -493,7 +843,10 @@ export async function executePipelineStep(input: ExecutionInput): Promise<Resear
     model_used: model,
     next_step_hint: hint,
     structured_output: structuredOutput,
-    updatedPlan
+    updatedPlan,
+    gemini_subcall_results: fanoutSubcallResults,
+    gemini_coverage_metrics: fanoutCoverageMetrics,
+    gemini_ranked_sources: fanoutRankedSources
   };
 }
 

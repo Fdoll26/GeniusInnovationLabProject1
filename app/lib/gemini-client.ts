@@ -5,6 +5,10 @@ const geminiApiBase =
   getEnv('GEMINI_API_BASE') ||
   'https://generativelanguage.googleapis.com/v1beta';
 const geminiModel = getEnv('GEMINI_MODEL') || 'gemini-1.5-pro-002';
+const geminiFastModel = getEnv('GEMINI_FAST_MODEL') || getEnv('GEMINI_MODEL') || 'gemini-2.0-flash';
+const GEMINI_DEFAULT_TIMEOUT_MS = 8 * 60_000;
+const GEMINI_RPM_LIMIT = 25;
+const geminiRequestLog: number[] = [];
 
 export type GeminiResponse = {
   outputText: string;
@@ -34,13 +38,42 @@ async function request(path: string, body: unknown, opts?: { timeoutMs?: number 
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Gemini request failed: ${errorText}`);
+      const retryAfterHeader = response.headers.get('retry-after');
+      const retryAfterMs = parseRetryAfterMs(retryAfterHeader);
+      throw new GeminiHttpError(
+        `Gemini request failed (${response.status}): ${errorText}`,
+        response.status,
+        retryAfterMs
+      );
     }
 
     return response.json();
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+class GeminiHttpError extends Error {
+  status: number;
+  retryAfterMs: number | null;
+
+  constructor(message: string, status: number, retryAfterMs: number | null) {
+    super(message);
+    this.name = 'GeminiHttpError';
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
+function parseRetryAfterMs(retryAfterHeader: string | null): number | null {
+  if (!retryAfterHeader) return null;
+  const asNumber = Number(retryAfterHeader);
+  if (Number.isFinite(asNumber) && asNumber >= 0) {
+    return Math.trunc(asNumber * 1000);
+  }
+  const asDate = Date.parse(retryAfterHeader);
+  if (!Number.isFinite(asDate)) return null;
+  return Math.max(0, asDate - Date.now());
 }
 
 type RefinementResponse = { questions: string[] };
@@ -139,11 +172,51 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
 type GeminiGroundingMetadata = {
   webSearchQueries?: string[];
   groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+  searchEntryPoint?: { renderedContent?: string; sdkBlob?: string };
   groundingSupports?: Array<{
     segment?: { endIndex?: number };
     groundingChunkIndices?: number[];
+    confidenceScores?: number[];
   }>;
 };
+
+export type GroundingChunk = {
+  uri: string;
+  title: string | null;
+};
+
+export type GeminiSubcallResult = {
+  subquestion: string;
+  status: 'completed' | 'failed';
+  responseText: string | null;
+  groundingMetadata: unknown | null;
+  searchEntryPoint: { renderedContent?: string; sdkBlob?: string } | null;
+  webSearchQueries: string[];
+  groundingChunks: GroundingChunk[];
+  groundingSupports: unknown[];
+  usageMetadata: unknown | null;
+  error: string | null;
+};
+
+export type GeminiCoverageMetrics = {
+  subcallsPlanned: number;
+  subcallsCompleted: number;
+  subcallsFailed: number;
+  uniqueSources: number;
+  uniqueDomains: number;
+  webSearchQueryCount: number;
+  groundedSegments: number;
+  avgConfidence: number | null;
+};
+
+export interface RankedSource {
+  url: string;
+  canonicalUrl: string;
+  title: string | null;
+  domain: string | null;
+  supportCount: number;
+  avgConfidence: number | null;
+}
 
 function getGeminiGroundingMetadata(data: unknown): GeminiGroundingMetadata | null {
   const typed = data as {
@@ -151,6 +224,120 @@ function getGeminiGroundingMetadata(data: unknown): GeminiGroundingMetadata | nu
   };
   const md = typed?.candidates?.[0]?.groundingMetadata as GeminiGroundingMetadata | undefined;
   return md && typeof md === 'object' ? md : null;
+}
+
+function sleep(ms: number): Promise<void> {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function checkGeminiRateLimit(): number {
+  const now = Date.now();
+  const windowStart = now - 60_000;
+  while (geminiRequestLog.length && geminiRequestLog[0]! < windowStart) {
+    geminiRequestLog.shift();
+  }
+  if (geminiRequestLog.length >= GEMINI_RPM_LIMIT) {
+    const oldest = geminiRequestLog[0]!;
+    return Math.max(0, oldest + 60_000 - now + 100);
+  }
+  return 0;
+}
+
+function recordGeminiRequest() {
+  geminiRequestLog.push(Date.now());
+}
+
+function shouldRetryGeminiRequest(error: unknown): { retry: boolean; retryAfterMs: number | null } {
+  if (error instanceof GeminiHttpError) {
+    return {
+      retry: error.status === 429 || error.status === 500 || error.status === 503,
+      retryAfterMs: error.retryAfterMs
+    };
+  }
+  const text = error instanceof Error ? error.message : String(error);
+  const retryableText = /429|500|503|rate limit|temporar|unavailable/i.test(text);
+  return { retry: retryableText, retryAfterMs: null };
+}
+
+function canonicalizeUrl(u: string): string {
+  try {
+    const url = new URL(u);
+    url.hash = '';
+    ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'].forEach((p) => url.searchParams.delete(p));
+    return url.toString();
+  } catch {
+    return u;
+  }
+}
+
+function domainOf(u: string): string | null {
+  try {
+    return new URL(u).hostname.replace(/^www\./, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function cleanGroundingChunk(input: unknown): GroundingChunk[] {
+  if (!Array.isArray(input)) return [];
+  const out: GroundingChunk[] = [];
+  for (const item of input) {
+    const uri = (item as { web?: { uri?: unknown } })?.web?.uri;
+    const title = (item as { web?: { title?: unknown } })?.web?.title;
+    if (typeof uri !== 'string' || !/^https?:\/\//i.test(uri)) continue;
+    out.push({
+      uri,
+      title: typeof title === 'string' ? title : null
+    });
+  }
+  return out;
+}
+
+function confidenceScoresOfSupport(support: unknown): number[] {
+  const scores = (support as { confidenceScores?: unknown })?.confidenceScores;
+  if (!Array.isArray(scores)) return [];
+  return scores.filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 1);
+}
+
+async function runGeminiGroundedSubcall(params: {
+  model: string;
+  prompt: string;
+  maxOutputTokens: number;
+  timeoutMs: number;
+}): Promise<unknown> {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const waitForRateLimit = checkGeminiRateLimit();
+    if (waitForRateLimit > 0) {
+      await sleep(waitForRateLimit);
+    }
+
+    try {
+      recordGeminiRequest();
+      return await request(
+        `/models/${params.model}:generateContent`,
+        {
+          tools: [{ google_search: {} }],
+          contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
+          generationConfig: {
+            maxOutputTokens: params.maxOutputTokens
+          }
+        },
+        { timeoutMs: params.timeoutMs }
+      );
+    } catch (error) {
+      const retry = shouldRetryGeminiRequest(error);
+      if (!retry.retry || attempt >= maxAttempts) {
+        throw error;
+      }
+      const jitter = Math.floor(Math.random() * 251);
+      const exponential = 500 * 2 ** (attempt - 1);
+      const retryAfter = retry.retryAfterMs != null ? retry.retryAfterMs : 0;
+      await sleep(Math.max(exponential + jitter, retryAfter));
+    }
+  }
+  throw new Error('Unreachable retry state');
 }
 
 export function extractGeminiGroundingMetadata(data: unknown): {
@@ -396,36 +583,13 @@ export async function runGemini(
     return { outputText: `Stubbed Gemini result for: ${refinedPrompt}` };
   }
   const selectedModel = opts?.model || geminiModel;
-  const timeBudgetMinutes = 10;
-  const maxSearchQueries = 80;
-  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources))) : 15;
-  const freshnessWindow = 'the last 12 months';
-  const contextConstraints = 'None';
+  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(1, Math.min(100, Math.trunc(opts.maxSources))) : 15;
+  const sourceBudgetText = `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`;
+  const depthText =
+    'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
+  const systemText = `${depthText}\n${sourceBudgetText}`;
 
-  const systemText =
-    'You are a Deep Research agent. Your job is to produce a rigorous, web-grounded research report with citations.\n\n' +
-    'SCOPE & CONSTRAINTS (obey strictly):\n' +
-    `- Time budget: ${timeBudgetMinutes} minutes maximum (stop early if needed).\n` +
-    `- Source budget: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.\n` +
-    `- Search budget: Perform at most ${maxSearchQueries} web searches total. Reuse sources when possible.\n` +
-    `- Freshness: Prefer sources from ${freshnessWindow} unless the topic requires older foundational sources.\n` +
-    `- Geography/Context constraints: ${contextConstraints}\n` +
-    '- If critical info is missing after the budget is exhausted, say so explicitly and list what you could not verify.\n\n' +
-    'QUALITY BAR:\n' +
-    '- Do not guess. If unsure, say “insufficient evidence found within budget.”\n' +
-    '- Resolve conflicting claims by comparing sources and explaining why you trust one over another.\n' +
-    '- Distinguish facts vs interpretations vs hypotheses.\n\n' +
-    'OUTPUT FORMAT (must follow):\n' +
-    '1) Research plan actually executed (brief: queries run + why; keep concise)\n' +
-    '2) Findings (structured with headings)\n' +
-    '3) Evidence table (Claim | Best supporting source | Counter/limits | Confidence 0–1)\n' +
-    '4) Gaps & next steps (what to research if budget increased)\n\n' +
-    'CITATION RULES:\n' +
-    '- Every non-trivial factual claim must have an inline citation like [http://example.com], [Book title by Example author].\n' +
-    '- Sources list must include: title, publisher/venue, date (if available), and URL.\n' +
-    '- Prefer citing the most authoritative source available; avoid low-quality blogs unless unavoidable.';
-
-  const legacyPrompt = `${systemText}\n\nRESEARCH QUESTION (refined):\n${refinedPrompt}`;
+  const legacyPrompt = `${systemText}\n\n${refinedPrompt}`;
   const safeSystemText =
     systemText +
     '\n\nIMPORTANT TOOLING NOTE:\n' +
@@ -620,5 +784,337 @@ export async function runGeminiReasoningStep(params: {
           }
         }
       : {})
+  };
+}
+
+export async function runGeminiReasoningStepFanOut(params: {
+  prompt: string;
+  queryPack: string[];
+  maxOutputTokens: number;
+  model?: string;
+  timeoutMs?: number;
+  maxParallelSubcalls?: number;
+  maxSubcalls?: number;
+}): Promise<{
+  text: string;
+  sources?: unknown;
+  usage?: unknown;
+  subcallResults: GeminiSubcallResult[];
+  coverageMetrics: GeminiCoverageMetrics;
+  rankedSources: RankedSource[];
+}> {
+  const model = params.model || geminiFastModel;
+  const totalBudgetMs =
+    typeof params.timeoutMs === 'number' && params.timeoutMs > 0 ? params.timeoutMs : GEMINI_DEFAULT_TIMEOUT_MS;
+  const startMs = Date.now();
+  const consolidationBudgetMs = Math.max(15_000, Math.floor(totalBudgetMs * 0.3));
+  const subcallBudgetMs = Math.max(15_000, totalBudgetMs - consolidationBudgetMs);
+  const subcallDeadline = startMs + subcallBudgetMs;
+  const maxParallel = Math.max(1, Math.min(10, Math.trunc(params.maxParallelSubcalls ?? 6)));
+  const maxSubcalls = Math.max(
+    1,
+    Math.min(30, Math.trunc(params.maxSubcalls ?? (Array.isArray(params.queryPack) ? params.queryPack.length : 1)))
+  );
+  const queryPack = (Array.isArray(params.queryPack) ? params.queryPack : [])
+    .map((q) => (typeof q === 'string' ? q.trim() : ''))
+    .filter(Boolean)
+    .slice(0, maxSubcalls);
+  const subquestions = queryPack.length > 0 ? queryPack : [params.prompt.slice(0, 300)];
+  const subcallResults: GeminiSubcallResult[] = [];
+  const masterPromptShort = params.prompt.slice(0, 800);
+  // Scout subcalls need a small, fixed budget: enough for 5-10 source citations and
+  // 3-4 factual paragraphs, but small enough that 16 parallel calls don't overflow the
+  // consolidation context. The user's maxOutputTokens governs the final synthesis output,
+  // not each individual grounded scout call.
+  const perSubcallMaxTokens = 800;
+  const perSubcallBaseTimeoutMs = Math.max(8_000, Math.floor((totalBudgetMs * 0.8) / maxParallel));
+
+  let nextIndex = 0;
+  const runWorker = async () => {
+    while (true) {
+      if (Date.now() >= subcallDeadline) return;
+      const idx = nextIndex;
+      nextIndex += 1;
+      if (idx >= subquestions.length) return;
+      const subquestion = subquestions[idx]!;
+      const remainingToDeadline = Math.max(0, subcallDeadline - Date.now());
+      // No padding beyond the remaining subcall budget - ensures consolidation always gets its time slice.
+      const timeoutMs = Math.max(5_000, Math.min(perSubcallBaseTimeoutMs, remainingToDeadline));
+
+      const subcallPrompt =
+        'You are a web research scout. Your ONLY job is to find as many DISTINCT, HIGH-QUALITY sources as possible on the subquestion below.\n\n' +
+        `MASTER RESEARCH QUESTION: ${masterPromptShort}\n\n` +
+        `SUBQUESTION FOR THIS SCOUT CALL: ${subquestion}\n\n` +
+        'MANDATORY REQUIREMENTS - you will be penalized for missing any of these:\n' +
+        '1. You MUST search and cite at least 5 different sources from at least 4 different domains.\n' +
+        '2. Each cited source must be from a DIFFERENT website (no two citations from the same domain).\n' +
+        '3. Preferred source types IN ORDER: peer-reviewed papers, .gov/.edu sites, official institutional reports, major news outlets, reputable industry analysis.\n' +
+        '4. For EACH source you cite: state the specific fact or finding it supports, and include its URL inline as [URL].\n' +
+        '5. If a supporting and a contradicting source exist, cite BOTH.\n\n' +
+        'OUTPUT FORMAT (strictly follow this):\n' +
+        '- Write 1 short paragraph per source (3-4 sentences max per paragraph).\n' +
+        '- Each paragraph: state the finding, cite the URL inline as [URL], note source type and date if known.\n' +
+        '- Do NOT write a long narrative. Short, dense, citation-rich paragraphs only.\n' +
+        '- End with a one-line summary: "Found X sources across Y domains."';
+
+      try {
+        const data = await runGeminiGroundedSubcall({
+          model,
+          prompt: subcallPrompt,
+          maxOutputTokens: perSubcallMaxTokens,
+          timeoutMs
+        });
+        const groundingMetadata = getGeminiGroundingMetadata(data);
+        const searchEntryPoint =
+          groundingMetadata?.searchEntryPoint && typeof groundingMetadata.searchEntryPoint === 'object'
+            ? {
+                renderedContent:
+                  typeof groundingMetadata.searchEntryPoint.renderedContent === 'string'
+                    ? groundingMetadata.searchEntryPoint.renderedContent
+                    : undefined,
+                sdkBlob:
+                  typeof groundingMetadata.searchEntryPoint.sdkBlob === 'string'
+                    ? groundingMetadata.searchEntryPoint.sdkBlob
+                    : undefined
+              }
+            : null;
+        subcallResults.push({
+          subquestion,
+          status: 'completed',
+          responseText: extractTextFromGemini(data).trim(),
+          groundingMetadata: groundingMetadata ?? null,
+          searchEntryPoint,
+          webSearchQueries: Array.isArray(groundingMetadata?.webSearchQueries)
+            ? groundingMetadata.webSearchQueries.filter((q): q is string => typeof q === 'string')
+            : [],
+          groundingChunks: cleanGroundingChunk(groundingMetadata?.groundingChunks),
+          groundingSupports: Array.isArray(groundingMetadata?.groundingSupports) ? groundingMetadata.groundingSupports : [],
+          usageMetadata: (data as { usageMetadata?: unknown })?.usageMetadata ?? null,
+          error: null
+        });
+      } catch (error) {
+        subcallResults.push({
+          subquestion,
+          status: 'failed',
+          responseText: null,
+          groundingMetadata: null,
+          searchEntryPoint: null,
+          webSearchQueries: [],
+          groundingChunks: [],
+          groundingSupports: [],
+          usageMetadata: null,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
+  };
+
+  await Promise.all(Array.from({ length: Math.min(maxParallel, subquestions.length) }, () => runWorker()));
+
+  const completed = subcallResults.filter((r) => r.status === 'completed');
+  const subcallsPlanned = subquestions.length;
+  const subcallsCompleted = completed.length;
+  const subcallsFailed = subcallsPlanned - subcallsCompleted;
+
+  const mergedChunks: Array<{ web: { uri: string; title?: string } }> = [];
+  const mergedSupports: unknown[] = [];
+  const webSearchQueries: string[] = [];
+  const chunkIndexByCanonicalUrl = new Map<string, number>();
+  const supportStats = new Map<number, { supportCount: number; confidenceTotal: number; confidenceCount: number }>();
+  const confidenceAll: number[] = [];
+
+  for (const result of completed) {
+    webSearchQueries.push(...result.webSearchQueries);
+    const localToMerged = new Map<number, number>();
+    result.groundingChunks.forEach((chunk, localIdx) => {
+      const canonical = canonicalizeUrl(chunk.uri);
+      const existing = chunkIndexByCanonicalUrl.get(canonical);
+      if (typeof existing === 'number') {
+        localToMerged.set(localIdx, existing);
+        return;
+      }
+      const next = mergedChunks.length;
+      chunkIndexByCanonicalUrl.set(canonical, next);
+      localToMerged.set(localIdx, next);
+      mergedChunks.push({
+        web: {
+          uri: chunk.uri,
+          ...(chunk.title ? { title: chunk.title } : {})
+        }
+      });
+    });
+
+    for (const support of result.groundingSupports) {
+      if (!support || typeof support !== 'object') continue;
+      const rec = support as { groundingChunkIndices?: unknown };
+      const originalIndices = Array.isArray(rec.groundingChunkIndices) ? rec.groundingChunkIndices : [];
+      const mapped = Array.from(
+        new Set(
+          originalIndices
+            .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0)
+            .map((idx) => localToMerged.get(idx))
+            .filter((idx): idx is number => typeof idx === 'number')
+        )
+      );
+      if (mapped.length === 0) continue;
+
+      const confidence = confidenceScoresOfSupport(support);
+      for (const score of confidence) confidenceAll.push(score);
+      for (const idx of mapped) {
+        const curr = supportStats.get(idx) ?? { supportCount: 0, confidenceTotal: 0, confidenceCount: 0 };
+        curr.supportCount += 1;
+        if (confidence.length > 0) {
+          curr.confidenceTotal += confidence.reduce((sum, n) => sum + n, 0);
+          curr.confidenceCount += confidence.length;
+        }
+        supportStats.set(idx, curr);
+      }
+
+      mergedSupports.push({
+        ...(support as Record<string, unknown>),
+        groundingChunkIndices: mapped
+      });
+    }
+  }
+
+  const rankedSources: RankedSource[] = mergedChunks
+    .map((chunk, idx) => {
+      const url = chunk.web.uri;
+      const canonicalUrl = canonicalizeUrl(url);
+      const stats = supportStats.get(idx) ?? { supportCount: 0, confidenceTotal: 0, confidenceCount: 0 };
+      return {
+        url,
+        canonicalUrl,
+        title: typeof chunk.web.title === 'string' ? chunk.web.title : null,
+        domain: domainOf(canonicalUrl),
+        supportCount: stats.supportCount,
+        avgConfidence: stats.confidenceCount > 0 ? stats.confidenceTotal / stats.confidenceCount : null
+      };
+    })
+    .sort((a, b) => {
+      if (b.supportCount !== a.supportCount) return b.supportCount - a.supportCount;
+      const aConfidence = a.avgConfidence ?? -1;
+      const bConfidence = b.avgConfidence ?? -1;
+      return bConfidence - aConfidence;
+    });
+
+  const uniqueCanonicalSources = new Set(rankedSources.map((s) => s.canonicalUrl));
+  const uniqueDomains = new Set(rankedSources.map((s) => s.domain).filter((d): d is string => Boolean(d)));
+  const coverageMetrics: GeminiCoverageMetrics = {
+    subcallsPlanned,
+    subcallsCompleted,
+    subcallsFailed,
+    uniqueSources: uniqueCanonicalSources.size,
+    uniqueDomains: uniqueDomains.size,
+    webSearchQueryCount: webSearchQueries.length,
+    groundedSegments: mergedSupports.length,
+    avgConfidence:
+      confidenceAll.length > 0 ? confidenceAll.reduce((sum, value) => sum + value, 0) / confidenceAll.length : null
+  };
+
+  const stepGoalLine =
+    params.prompt
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0)?.slice(0, 240) ?? 'Research step synthesis';
+  const SUBCALL_TEXT_CHAR_LIMIT = 1200;
+  const findings = completed
+    .filter((item) => item.responseText)
+    .map((item, idx) => {
+      const text = item.responseText ?? '';
+      const truncated =
+        idx < 4
+          ? text
+          : text.slice(0, SUBCALL_TEXT_CHAR_LIMIT) + (text.length > SUBCALL_TEXT_CHAR_LIMIT ? '... [truncated]' : '');
+      const urlList = item.groundingChunks
+        .map((c) => c.uri)
+        .filter(Boolean)
+        .map((u) => `[${u}]`)
+        .join(' ');
+      const urlAppendix = urlList ? `\nSOURCES FROM THIS SUBCALL: ${urlList}` : '';
+      return `---\n[SCOUT ${idx + 1} | subquestion: ${item.subquestion}]\n${truncated}${urlAppendix}\n---`;
+    })
+    .join('\n');
+
+  let text = '';
+  if (!findings.trim()) {
+    text = 'No grounded subcall findings were completed within the time budget.';
+  } else {
+    // System instruction is sent as a dedicated field (not embedded in user content)
+    // so the model treats it as a binding directive rather than part of the prompt text.
+    const consolidationSystemInstruction =
+      'You are a senior research analyst. Your job is to synthesize web research findings into a ' +
+      'comprehensive, citation-rich report section. Never drop source URLs - every URL present in ' +
+      'the scout reports must appear as an inline citation [URL] in your output. Never truncate or ' +
+      'stop early. Cover all findings completely before writing the Sources section.';
+
+    // The user-facing prompt contains only the findings and instructions - no system preamble.
+    const consolidationPrompt =
+      `RESEARCH STEP GOAL: ${stepGoalLine}\n\n` +
+      `SCOUT FINDINGS (${subcallsCompleted} of ${subquestions.length} scouts completed):\n` +
+      `${findings}\n\n` +
+      'SYNTHESIS INSTRUCTIONS:\n' +
+      '1. Write a comprehensive synthesis organized by THEME. Do NOT organize by scout number.\n' +
+      '2. For every claim, include its source URL inline as [URL] immediately after the claim.\n' +
+      '3. Every URL listed in any "SOURCES FROM THIS SUBCALL" line MUST appear somewhere in your output.\n' +
+      '4. When scouts contradict each other, present both sides with their respective citations.\n' +
+      '5. Include all statistics, dates, named organizations, and quantitative data from the scouts.\n' +
+      '6. Do NOT add any information not present in the scout reports.\n' +
+      '7. Write until all findings are covered - do not stop early.\n' +
+      '8. After the synthesis prose, write a "## Sources" section listing every unique URL on its own line formatted as: [URL] - Title (if known).';
+
+    const remainingTotalBudget = Math.max(5_000, startMs + totalBudgetMs - Date.now());
+    const consolidationTimeoutMs = Math.max(15_000, Math.min(consolidationBudgetMs, remainingTotalBudget));
+    // The consolidation synthesis needs tokens proportional to the number of scouts.
+    const consolidationOutputTokens = Math.min(8000, Math.max(4000, subcallsCompleted * 300));
+    try {
+      const consolidationData = await request(
+        `/models/${model}:generateContent`,
+        {
+          system_instruction: {
+            parts: [{ text: consolidationSystemInstruction }]
+          },
+          contents: [{ role: 'user', parts: [{ text: consolidationPrompt }] }],
+          generationConfig: { maxOutputTokens: consolidationOutputTokens }
+        },
+        { timeoutMs: consolidationTimeoutMs }
+      );
+      text = extractTextFromGemini(consolidationData).trim();
+    } catch {
+      // Consolidation failed: fall back to scout concatenation and always append all URLs.
+      const allUrls = mergedChunks
+        .map((c) => c.web.uri)
+        .filter(Boolean)
+        .map((u) => `[${u}]`)
+        .join('\n');
+      text =
+        completed
+          .map((item) => (item.responseText ? `### ${item.subquestion}\n${item.responseText}` : ''))
+          .filter(Boolean)
+          .join('\n\n') + (allUrls ? `\n\n## Sources\n${allUrls}` : '');
+    }
+  }
+
+  return {
+    text,
+    sources: {
+      groundingMetadata: {
+        webSearchQueries,
+        groundingChunks: mergedChunks,
+        groundingSupports: mergedSupports
+      },
+      web_search_call_sources: mergedChunks.map((chunk) => ({
+        url: chunk.web.uri,
+        title: typeof chunk.web.title === 'string' ? chunk.web.title : null
+      }))
+    },
+    usage: {
+      subcallUsage: subcallResults.map((result) => result.usageMetadata),
+      subcallsCompleted,
+      subcallsFailed
+    },
+    subcallResults,
+    coverageMetrics,
+    rankedSources
   };
 }
