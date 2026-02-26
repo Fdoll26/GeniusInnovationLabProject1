@@ -87,6 +87,8 @@ export default function SessionDetail({
   onClose: () => void;
 }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
   const [retryError, setRetryError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [regenStatus, setRegenStatus] = useState<'idle' | 'running' | 'success' | 'error'>('idle');
@@ -94,26 +96,64 @@ export default function SessionDetail({
   const [retrying, setRetrying] = useState(false);
   const { data: authSession } = useSession();
 
-  useEffect(() => {
-    if (!sessionId) {
-      return;
-    }
-    const load = async () => {
-      const response = await fetch(`/api/research/sessions/${sessionId}`);
+  async function loadDetail(targetSessionId: string, signal?: AbortSignal) {
+    setLoadingDetail(true);
+    setDetailError(null);
+    try {
+      const response = await fetch(`/api/research/sessions/${targetSessionId}`, { cache: 'no-store', signal });
       if (!response.ok) {
-        return;
+        throw new Error(`Failed to load session (${response.status})`);
       }
       const data = (await response.json()) as SessionDetail;
       setDetail(data);
-    };
-    load();
+    } catch (error) {
+      if (signal?.aborted) {
+        return;
+      }
+      setDetail(null);
+      setDetailError(error instanceof Error ? error.message : 'Failed to load session');
+    } finally {
+      if (!signal?.aborted) {
+        setLoadingDetail(false);
+      }
+    }
+  }
+
+  useEffect(() => {
+    if (!sessionId) {
+      setDetail(null);
+      setLoadingDetail(false);
+      setDetailError(null);
+      return;
+    }
+    const controller = new AbortController();
+    void loadDetail(sessionId, controller.signal);
+    return () => controller.abort();
   }, [sessionId]);
 
   if (!sessionId) {
     return null;
   }
 
-  if (!detail) {
+  if (detailError) {
+    return (
+      <div className="modal-backdrop">
+        <div className="modal card stack">
+          <p role="alert">{detailError}</p>
+          <div className="row">
+            <button type="button" onClick={() => void loadDetail(sessionId)}>
+              Retry
+            </button>
+            <button type="button" className="button-secondary" onClick={onClose}>
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (loadingDetail || !detail) {
     return (
       <div className="modal-backdrop">
         <div className="modal card">Loading session...</div>
@@ -215,10 +255,7 @@ export default function SessionDetail({
       }
       setRegenStatus('success');
       // Refresh detail to reflect any updated report metadata.
-      const refreshed = await fetch(`/api/research/sessions/${currentSessionId}`);
-      if (refreshed.ok) {
-        setDetail((await refreshed.json()) as SessionDetail);
-      }
+      await loadDetail(currentSessionId);
       setTimeout(() => setRegenStatus('idle'), 2500);
     } catch (err) {
       setRegenStatus('error');
@@ -352,8 +389,8 @@ export default function SessionDetail({
             <details className="details">
               <summary className="details__summary">Sources ({detail.research.sources.length})</summary>
               <div className="details__body stack">
-                {detail.research.sources.map((source) => (
-                  <small key={source.source_id}>
+                {detail.research.sources.map((source, index) => (
+                  <small key={`${source.source_id}:${source.url}:${index}`}>
                     {source.title || source.url} {source.reliability_tags?.length ? `(${source.reliability_tags.join(', ')})` : ''}
                   </small>
                 ))}
