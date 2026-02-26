@@ -11,6 +11,21 @@ afterEach(() => {
 });
 
 describe('upsertProviderResult jsonb serialization', () => {
+  it('preserves an existing started_at timestamp on conflict updates', async () => {
+    query.mockResolvedValueOnce([{ id: 'row-1' }]);
+
+    await upsertProviderResult({
+      sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      modelRunId: '123e4567-e89b-12d3-a456-426614174111',
+      provider: 'openai',
+      status: 'running',
+      startedAt: '2026-02-26T00:00:00.000Z'
+    });
+
+    const [sql] = query.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('started_at = COALESCE(provider_results.started_at, EXCLUDED.started_at)');
+  });
+
   it('serializes array sources as JSON text', async () => {
     query.mockResolvedValueOnce([{ id: 'row-1' }]);
 
