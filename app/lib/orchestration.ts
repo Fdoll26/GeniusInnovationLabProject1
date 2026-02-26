@@ -38,7 +38,11 @@ async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): P
         error: error instanceof Error ? error.message : String(error)
       });
     };
-    client.on('error', onClientError);
+    const clientWithEvents = client as unknown as {
+      on: (event: 'error', listener: (error: unknown) => void) => void;
+      off: (event: 'error', listener: (error: unknown) => void) => void;
+    };
+    clientWithEvents.on('error', onClientError);
     try {
       const result = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey]);
       if (!result.rows[0]?.ok) {
@@ -54,7 +58,7 @@ async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): P
         }
       }
     } finally {
-      client.off('error', onClientError);
+      clientWithEvents.off('error', onClientError);
       client.release();
     }
   }
