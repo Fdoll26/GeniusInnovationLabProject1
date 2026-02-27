@@ -460,10 +460,22 @@ async function requestGet(path: string, opts?: { requestTimeoutMs?: number; head
   throw lastError instanceof Error ? lastError : new Error('OpenAI request failed');
 }
 
+function normalizeResponseData(data: unknown): unknown {
+  const typed = data as Record<string, unknown> | null;
+  if (typed && typeof typed === 'object' && !Array.isArray(typed)) {
+    const nested = typed.response;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return nested;
+    }
+  }
+  return data;
+}
+
 function extractOutputText(data: unknown): string {
-  const typed = data as {
+  const normalized = normalizeResponseData(data);
+  const typed = normalized as {
     output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
     sources?: unknown;
   };
 
@@ -530,18 +542,24 @@ function extractOutputText(data: unknown): string {
       return out;
     };
 
-    const parts: string[] = [];
+    const messageParts: string[] = [];
+    const fallbackParts: string[] = [];
     for (const item of outputItems) {
+      const itemType = typeof (item as { type?: unknown })?.type === 'string' ? ((item as { type?: string }).type ?? null) : null;
       const content = Array.isArray((item as any)?.content) ? ((item as any).content as any[]) : [];
       for (const block of content) {
         const text = typeof block?.text === 'string' ? block.text : '';
         const withCites = addCitations(text, block?.annotations);
         if (withCites) {
-          parts.push(withCites);
+          if (itemType === 'message' || itemType === 'output_message') {
+            messageParts.push(withCites);
+          } else {
+            fallbackParts.push(withCites);
+          }
         }
       }
     }
-    const combined = parts.join('');
+    const combined = messageParts.join('') || fallbackParts.join('');
     if (combined) {
       return combined;
     }
@@ -555,14 +573,19 @@ function extractOutputText(data: unknown): string {
 }
 
 export function getResponseOutputText(data: unknown): string {
-  return extractOutputText(data);
+  return extractOutputText(normalizeResponseData(data));
 }
 
 export function getResponsePrimaryMessageContent(data: unknown): { text: string; annotations: unknown } | null {
-  const typed = data as {
-    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+  const normalized = normalizeResponseData(data);
+  const typed = normalized as {
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
   };
-  const firstContent = typed?.output?.[0]?.content?.[0];
+  const messageItem = typed?.output?.find(
+    (item) => item?.type === 'message' || item?.type === 'output_message'
+  );
+  const targetItem = messageItem ?? typed?.output?.[0];
+  const firstContent = targetItem?.content?.[0];
   if (!firstContent || typeof firstContent.text !== 'string') {
     return null;
   }
@@ -573,8 +596,9 @@ export function getResponsePrimaryMessageContent(data: unknown): { text: string;
 }
 
 export function getResponseSources(data: unknown): unknown {
-  const topLevel = (data as { sources?: unknown }).sources ?? null;
-  const consulted = getResponseWebSearchCallSources(data);
+  const normalized = normalizeResponseData(data);
+  const topLevel = (normalized as { sources?: unknown }).sources ?? null;
+  const consulted = getResponseWebSearchCallSources(normalized);
   if (consulted.length === 0) return topLevel;
   return {
     response_sources: topLevel,
@@ -583,9 +607,10 @@ export function getResponseSources(data: unknown): unknown {
 }
 
 export function getResponseWebSearchCallSources(data: unknown): Array<{ url: string; title?: string | null }> {
+  const normalized = normalizeResponseData(data);
   const out: Array<{ url: string; title?: string | null }> = [];
   const seen = new Set<string>();
-  const output = (data as { output?: unknown[] })?.output;
+  const output = (normalized as { output?: unknown[] })?.output;
   if (!Array.isArray(output)) return out;
 
   for (const item of output) {
@@ -712,7 +737,7 @@ export async function runResearch(
   }
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
+      ? Math.max(10, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
@@ -846,7 +871,7 @@ export async function startResearchJob(
 
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
+      ? Math.max(10, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null

@@ -70,7 +70,8 @@ const GAP_CHECK_SCHEMA: Record<string, unknown> = {
     follow_up_queries: { type: 'array', items: { type: 'string' } },
     severe_gaps: { type: 'boolean' }
   },
-  required: ['missing_sections', 'weak_claims', 'missing_primary_sources', 'follow_up_queries', 'severe_gaps']
+  required: ['missing_sections', 'weak_claims', 'missing_primary_sources', 'follow_up_queries', 'severe_gaps'],
+  additionalProperties: false
 };
 
 function hash(input: string): number {
@@ -460,6 +461,7 @@ async function runDeep(params: {
   timeoutMs: number;
   sourceTarget: number;
   model: string;
+  maxOutputTokens?: number;
 }) {
   if (params.provider === 'openai') {
     const out = await startResearchJob(params.prompt, {
@@ -489,7 +491,8 @@ async function runDeep(params: {
   const out = await runGemini(params.prompt, {
     timeoutMs: params.timeoutMs,
     maxSources: params.sourceTarget,
-    model: params.model
+    model: params.model,
+    maxOutputTokens: params.maxOutputTokens
   });
   return {
     text: out.outputText,
@@ -921,10 +924,16 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
       : isDeepTier
       ? await runDeep({
           provider: input.provider,
-          prompt: promptDef.prompt,
+          // Pass the original research question directly so the deep research
+          // model behaves like the browser product (clean question, no
+          // pipeline scaffolding that sends it off-topic).
+          prompt: input.question,
           timeoutMs: input.timeoutMs,
           sourceTarget: input.sourceTarget,
-          model
+          model,
+          // Gemini needs a high ceiling; 2500 tokens (the old default) is
+          // ~1–2 pages and truncates comprehensive reports.
+          maxOutputTokens: 32768
         })
       : await runFastReasoning({
           provider: input.provider,

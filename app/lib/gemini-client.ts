@@ -679,13 +679,18 @@ export async function generateModelComparisonGemini(
 
 export async function runGemini(
   refinedPrompt: string,
-  opts?: { stub?: boolean; timeoutMs?: number; maxSources?: number; model?: string }
+  opts?: { stub?: boolean; timeoutMs?: number; maxSources?: number; model?: string; maxOutputTokens?: number }
 ): Promise<GeminiResponse> {
   if (opts?.stub) {
     return { outputText: `Stubbed Gemini result for: ${refinedPrompt}` };
   }
   const selectedModel = opts?.model || geminiModel;
-  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(1, Math.min(100, Math.trunc(opts.maxSources))) : 15;
+  const maxSources = typeof opts?.maxSources === 'number' ? Math.max(10, Math.min(100, Math.trunc(opts.maxSources))) : 15;
+  // Default to 32 768 tokens — enough for a full deep-research report.
+  // The old hardcoded 2500 was cutting Gemini off after ~1–2 pages.
+  const outputTokenCeiling = typeof opts?.maxOutputTokens === 'number' && opts.maxOutputTokens > 0
+    ? opts.maxOutputTokens
+    : 32768;
   const sourceBudgetText = `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`;
   const depthText =
     'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
@@ -708,7 +713,7 @@ export async function runGemini(
         {
           ...(tools ? { tools } : {}),
           contents: [{ role: 'user', parts: [{ text: params.systemKey ? `${safeSystemText}\n\nRESEARCH QUESTION (refined):\n${refinedPrompt}` : legacyPrompt }] }],
-          generationConfig: { maxOutputTokens: 2500 }
+          generationConfig: { maxOutputTokens: outputTokenCeiling }
         },
         { timeoutMs: opts?.timeoutMs }
       );
@@ -720,7 +725,7 @@ export async function runGemini(
           ...(tools ? { tools } : {}),
           system_instruction: { parts: [{ text: systemText }] },
           contents: [{ role: 'user', parts: [{ text: refinedPrompt }] }],
-          generationConfig: { maxOutputTokens: 2500 }
+          generationConfig: { maxOutputTokens: outputTokenCeiling }
         },
         { timeoutMs: opts?.timeoutMs }
       );
@@ -732,7 +737,7 @@ export async function runGemini(
           ...(tools ? { tools } : {}),
           systemInstruction: { parts: [{ text: systemText }] },
           contents: [{ role: 'user', parts: [{ text: refinedPrompt }] }],
-          generationConfig: { maxOutputTokens: 2500 }
+          generationConfig: { maxOutputTokens: outputTokenCeiling }
         },
         { timeoutMs: opts?.timeoutMs }
       );
@@ -742,7 +747,7 @@ export async function runGemini(
       {
         ...(tools ? { tools } : {}),
         contents: [{ role: 'user', parts: [{ text: legacyPrompt }] }],
-        generationConfig: { maxOutputTokens: 2500 }
+        generationConfig: { maxOutputTokens: outputTokenCeiling }
       },
       { timeoutMs: opts?.timeoutMs }
     );
@@ -784,14 +789,14 @@ export async function runGemini(
         tools: [{ google_search: {} }],
         system_instruction: { parts: [{ text: safeSystemText }] },
         contents: [{ role: 'user', parts: [{ text: refinedPrompt }] }],
-        generationConfig: { maxOutputTokens: 2500 }
+        generationConfig: { maxOutputTokens: outputTokenCeiling }
       }, { timeoutMs: opts?.timeoutMs });
     } catch {
       data = await request(
         `/models/${selectedModel}:generateContent`,
         {
           contents: [{ role: 'user', parts: [{ text: `${safeSystemText}\n\nRESEARCH QUESTION (refined):\n${refinedPrompt}` }] }],
-          generationConfig: { maxOutputTokens: 2500 }
+          generationConfig: { maxOutputTokens: outputTokenCeiling }
         },
         { timeoutMs: opts?.timeoutMs }
       );
