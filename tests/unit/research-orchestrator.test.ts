@@ -174,7 +174,7 @@ describe('research-orchestrator gap loop', () => {
       clarifications_json: null,
       research_brief_json: null,
       research_plan_json: null,
-      progress_json: { gap_loops: 1 },
+      progress_json: { gap_loops: 2 },
       current_step_index: 6,
       max_steps: 8,
       target_sources_per_step: 5,

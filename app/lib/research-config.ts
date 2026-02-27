@@ -45,7 +45,7 @@ const defaults: Record<ResearchProviderName, ProviderResearchConfig> = {
     },
     max_candidates: 40,
     shortlist_size: 18,
-    max_gap_loops: 1
+    max_gap_loops: 2
   },
   gemini: {
     nano_model: getEnv('GEMINI_FAST_MODEL') || 'gemini-2.0-flash',
@@ -64,7 +64,7 @@ const defaults: Record<ResearchProviderName, ProviderResearchConfig> = {
     },
     max_candidates: 40,
     shortlist_size: 18,
-    max_gap_loops: 1
+    max_gap_loops: 2
   }
 };
 
