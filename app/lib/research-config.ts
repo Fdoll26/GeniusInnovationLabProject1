@@ -40,8 +40,8 @@ const defaults: Record<ResearchProviderName, ProviderResearchConfig> = {
     max_gap_loops: 1
   },
   gemini: {
-    fast_model: getEnv('GEMINI_MODEL') || 'gemini-1.5-pro-002',
-    deep_model: getEnv('GEMINI_MODEL') || 'gemini-1.5-pro-002',
+    fast_model: getEnv('GEMINI_FAST_MODEL') || 'gemini-2.0-flash',
+    deep_model: getEnv('GEMINI_DEEP_MODEL') || getEnv('GEMINI_MODEL') || 'gemini-2.5-pro',
     steps: {
       DEVELOP_RESEARCH_PLAN: { model_tier: 'fast', max_output_tokens: 1400 },
       DISCOVER_SOURCES_WITH_PLAN: { model_tier: 'deep', max_output_tokens: 2600 },

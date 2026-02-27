@@ -1080,6 +1080,43 @@ export async function summarizeForReport(
   return extractOutputText(data).trim();
 }
 
+export async function generateModelComparisonOpenAI(
+  input: {
+    openaiReport: string;
+    geminiReport: string;
+    topic: string;
+  },
+  opts?: { stub?: boolean; timeoutMs?: number }
+): Promise<string> {
+  if (opts?.stub) {
+    return `Stub comparison for topic: ${input.topic}.`;
+  }
+
+  const openaiExcerpt = input.openaiReport.trim().slice(0, 5000);
+  const geminiExcerpt = input.geminiReport.trim().slice(0, 5000);
+
+  const data = await request(
+    '/responses',
+    {
+      model: summaryModel,
+      input:
+        `You are a senior research analyst comparing two independent AI-generated research reports on the same topic.\n\n` +
+        `RESEARCH TOPIC: ${input.topic}\n\n` +
+        `OPENAI REPORT EXCERPT:\n${openaiExcerpt}\n\n` +
+        `GEMINI REPORT EXCERPT:\n${geminiExcerpt}\n\n` +
+        `Write a concise but thorough comparison with these subsections:\n` +
+        `1. **Key Agreements** - Major findings both reports agree on.\n` +
+        `2. **Notable Differences** - Where the reports diverge.\n` +
+        `3. **Unique OpenAI Insights** - Only in the OpenAI report.\n` +
+        `4. **Unique Gemini Insights** - Only in the Gemini report.\n` +
+        `5. **Coverage Assessment** - Brief overall assessment of depth and reliability.\n\n` +
+        `Use neutral language. Be specific about differences.`
+    },
+    opts?.timeoutMs ? { requestTimeoutMs: opts.timeoutMs, headersTimeoutMs: opts.timeoutMs, bodyTimeoutMs: opts.timeoutMs } : undefined
+  );
+  return extractOutputText(data).trim();
+}
+
 export async function runOpenAiReasoningStep(params: {
   prompt: string;
   maxOutputTokens: number;

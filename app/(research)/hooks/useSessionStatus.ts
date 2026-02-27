@@ -53,6 +53,8 @@ type SessionStatusEntry = SessionStatusSnapshot & {
   listeners: Set<() => void>;
   timer: ReturnType<typeof setTimeout> | null;
   inFlight: Promise<void> | null;
+  stream: EventSource | null;
+  streamRetryTimer: ReturnType<typeof setTimeout> | null;
   intervalMs: number;
   consecutiveFailures: number;
   lastHash: string | null;
@@ -73,6 +75,8 @@ function getOrCreateEntry(sessionId: string): SessionStatusEntry {
     listeners: new Set(),
     timer: null,
     inFlight: null,
+    stream: null,
+    streamRetryTimer: null,
     intervalMs: POLL_INTERVAL_MS,
     consecutiveFailures: 0,
     lastHash: null
@@ -151,6 +155,75 @@ async function fetchSessionStatus(sessionId: string) {
   return entry.inFlight;
 }
 
+function closeSessionStream(entry: SessionStatusEntry) {
+  if (entry.stream) {
+    entry.stream.close();
+    entry.stream = null;
+  }
+  if (entry.streamRetryTimer) {
+    clearTimeout(entry.streamRetryTimer);
+    entry.streamRetryTimer = null;
+  }
+}
+
+function openSessionStream(sessionId: string) {
+  const entry = entriesBySession.get(sessionId);
+  if (!entry || entry.listeners.size === 0 || typeof window === 'undefined' || entry.stream) {
+    return;
+  }
+
+  const stream = new EventSource(`/api/research/${sessionId}/stream`);
+  entry.stream = stream;
+
+  stream.onmessage = (event) => {
+    const current = entriesBySession.get(sessionId);
+    if (!current) {
+      stream.close();
+      return;
+    }
+    try {
+      const data = JSON.parse(event.data) as SessionStatus | { type?: string; message?: string };
+      if (data && typeof data === 'object' && 'type' in data && data.type === 'error') {
+        current.error = typeof data.message === 'string' ? data.message : 'Stream error';
+        notify(current);
+        return;
+      }
+      if (data && typeof data === 'object' && 'type' in data && data.type === 'terminal') {
+        closeSessionStream(current);
+        return;
+      }
+      const status = data as SessionStatus;
+      const nextHash = JSON.stringify(status);
+      const changed = nextHash !== current.lastHash;
+      const hadError = Boolean(current.error);
+      current.status = status;
+      current.lastHash = nextHash;
+      current.error = null;
+      current.consecutiveFailures = 0;
+      current.intervalMs = POLL_INTERVAL_MS;
+      if (changed || hadError) {
+        notify(current);
+      }
+    } catch {
+      // ignore malformed stream payloads
+    }
+  };
+
+  stream.onerror = () => {
+    const current = entriesBySession.get(sessionId);
+    if (!current) {
+      stream.close();
+      return;
+    }
+    closeSessionStream(current);
+    if (current.listeners.size > 0) {
+      current.streamRetryTimer = setTimeout(() => {
+        openSessionStream(sessionId);
+      }, 2000);
+    }
+  };
+}
+
 export function useSessionStatus(sessionId: string | null) {
   const [snapshot, setSnapshot] = useState<SessionStatusSnapshot>({ status: null, error: null });
 
@@ -168,6 +241,7 @@ export function useSessionStatus(sessionId: string | null) {
     sync();
 
     void fetchSessionStatus(sessionId);
+    openSessionStream(sessionId);
     const onFocus = () => {
       void fetchSessionStatus(sessionId);
     };
@@ -187,6 +261,7 @@ export function useSessionStatus(sessionId: string | null) {
           clearTimeout(entry.timer);
         }
         entry.timer = null;
+        closeSessionStream(entry);
         if (!entry.inFlight) {
           entriesBySession.delete(sessionId);
         }

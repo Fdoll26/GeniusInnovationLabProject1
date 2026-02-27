@@ -9,6 +9,7 @@ import { listSessionResearchSnapshots } from '../../../../../lib/research-orches
 
 const STATUS_SYNC_THROTTLE_MS = Number.parseInt(process.env.STATUS_SYNC_THROTTLE_MS ?? '15000', 10);
 const lastStatusSyncAttemptBySession = new Map<string, number>();
+const statusSyncInFlightBySession = new Map<string, Promise<void>>();
 
 function shouldAttemptStatusSync(sessionId: string): boolean {
   const now = Date.now();
@@ -25,6 +26,23 @@ function shouldAttemptStatusSync(sessionId: string): boolean {
     }
   }
   return true;
+}
+
+function triggerStatusSync(sessionId: string, opts: Parameters<typeof syncSession>[1]) {
+  const inFlight = statusSyncInFlightBySession.get(sessionId);
+  if (inFlight) {
+    return;
+  }
+  const p = (async () => {
+    try {
+      await syncSession(sessionId, opts);
+    } catch {
+      // best-effort; status polling should not hard-fail on sync errors
+    } finally {
+      statusSyncInFlightBySession.delete(sessionId);
+    }
+  })();
+  statusSyncInFlightBySession.set(sessionId, p);
 }
 
 function normalizeProviderStepsForDisplay(
@@ -79,21 +97,16 @@ export async function GET(_request: Request, { params }: { params: Promise<{ ses
     (sessionRecord.state === 'running_research' || sessionRecord.state === 'aggregating') &&
     shouldAttemptStatusSync(sessionId)
   ) {
-    try {
-      const debug = await getDebugFlags();
-      await syncSession(sessionId, {
-        stub: debug.stubExternals,
-        stubOpenAI: debug.stubOpenAI,
-        stubGemini: debug.stubGemini,
-        stubPdf: debug.stubPdf,
-        stubEmail: debug.stubEmail,
-        skipOpenAI: debug.skipOpenAI,
-        skipGemini: debug.skipGemini
-      });
-      sessionRecord = (await getSessionById(sessionId)) ?? sessionRecord;
-    } catch {
-      // best-effort; status polling should not hard-fail on sync errors
-    }
+    const debug = await getDebugFlags();
+    triggerStatusSync(sessionId, {
+      stub: debug.stubExternals,
+      stubOpenAI: debug.stubOpenAI,
+      stubGemini: debug.stubGemini,
+      stubPdf: debug.stubPdf,
+      stubEmail: debug.stubEmail,
+      skipOpenAI: debug.skipOpenAI,
+      skipGemini: debug.skipGemini
+    });
   }
 
   const [providerResults, researchRuns] = await Promise.all([

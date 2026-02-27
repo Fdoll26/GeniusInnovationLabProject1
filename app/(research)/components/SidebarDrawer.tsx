@@ -189,6 +189,16 @@ export default function SidebarDrawer({
           >
             Settings
           </button>
+          <button
+            type="button"
+            className={classNames('drawer__link', isActive('/debug') && 'is-active')}
+            onClick={() => {
+              router.push('/debug');
+              onClose();
+            }}
+          >
+            Debug
+          </button>
 
           <button
             type="button"

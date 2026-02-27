@@ -2,6 +2,7 @@
 
 import { useState } from 'react';
 import { useSessionStatus } from '../hooks/useSessionStatus';
+import { STEP_LABELS } from '../../lib/research-types';
 
 export default function SessionStatus({ sessionId }: { sessionId: string | null }) {
   const { status, error } = useSessionStatus(sessionId);
@@ -65,6 +66,8 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
     const run = providerProgressByName.get(provider);
     const providerName = provider === 'openai' ? 'OpenAI' : 'Gemini';
     const steps = [...(run?.steps ?? [])].sort((a, b) => a.stepIndex - b.stepIndex);
+    const totalStepsDisplay = steps.length || run?.progress?.totalSteps || 8;
+    const stepNumberDisplay = Math.min(run?.progress?.stepNumber ?? 0, totalStepsDisplay);
     const canToggle = steps.length > 0;
     const expanded = isExpanded(provider);
 
@@ -79,10 +82,7 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
         {providerResult?.completedAt ? <small className="muted">Completed: {new Date(providerResult.completedAt).toLocaleString()}</small> : null}
         {run?.progress?.stepLabel ? (
           <small className="muted">
-            {`${providerName}: ${run.progress.stepLabel} (${Math.min(
-              run.progress.stepNumber ?? 0,
-              run.progress.totalSteps ?? 8
-            )}/${run.progress.totalSteps ?? 8})`}
+            {`${providerName}: ${run.progress.stepLabel} (${stepNumberDisplay}/${totalStepsDisplay})`}
           </small>
         ) : null}
         {canToggle ? (
@@ -101,7 +101,8 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
               >
                 <span className="step__dot" aria-hidden />
                 <span>
-                  #{step.stepIndex + 1} {step.stepType.replace(/_/g, ' ')} - {step.status}
+                  #{step.stepIndex + 1} {STEP_LABELS[step.stepType as keyof typeof STEP_LABELS] ?? step.stepType.replace(/_/g, ' ')} -{' '}
+                  {step.status}
                 </span>
               </div>
             ))}

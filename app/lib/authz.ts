@@ -18,6 +18,9 @@ export function unauthorizedResponse(error: unknown) {
   if (error instanceof Error && error.message === 'Unauthorized') {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
+  if (error instanceof Error && error.message === 'Forbidden') {
+    return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+  }
   return null;
 }
 

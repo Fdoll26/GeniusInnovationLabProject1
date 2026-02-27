@@ -4,8 +4,10 @@ const geminiApiKey = getEnv('GEMINI_API_KEY');
 const geminiApiBase =
   getEnv('GEMINI_API_BASE') ||
   'https://generativelanguage.googleapis.com/v1beta';
-const geminiModel = getEnv('GEMINI_MODEL') || 'gemini-1.5-pro-002';
-const geminiFastModel = getEnv('GEMINI_FAST_MODEL') || getEnv('GEMINI_MODEL') || 'gemini-2.0-flash';
+const geminiModel = getEnv('GEMINI_MODEL') || 'gemini-2.5-pro';
+const geminiDeepModel = getEnv('GEMINI_DEEP_MODEL') || geminiModel;
+const geminiFastModel = getEnv('GEMINI_FAST_MODEL') || 'gemini-2.0-flash';
+const geminiSubcallModel = getEnv('GEMINI_SUBCALL_MODEL') || geminiFastModel;
 const GEMINI_DEFAULT_TIMEOUT_MS = 8 * 60_000;
 const GEMINI_RPM_LIMIT = 25;
 const geminiRequestLog: number[] = [];
@@ -119,7 +121,7 @@ function getGeminiFinishInfo(data: unknown): { finishReason: string | null; fini
   return { finishReason, finishMessage };
 }
 
-function looksTruncated(text: string): boolean {
+export function looksTruncated(text: string): boolean {
   const trimmed = text.trim();
   if (!trimmed) return false;
   const last = trimmed.slice(-1);
@@ -148,6 +150,7 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
     'minimum',
     'maximum'
   ]);
+  const numericConstraintKeys = new Set(['minItems', 'maxItems', 'minLength', 'maxLength', 'minimum', 'maximum']);
 
   for (const [key, rawValue] of Object.entries(input)) {
     if (!allowedKeys.has(key)) continue;
@@ -161,6 +164,11 @@ function sanitizeSchemaForGemini(schema: unknown): unknown {
     }
     if (key === 'items') {
       out.items = sanitizeSchemaForGemini(rawValue);
+      continue;
+    }
+    if (numericConstraintKeys.has(key)) {
+      const asNumber = typeof rawValue === 'string' ? Number(rawValue) : rawValue;
+      out[key] = typeof asNumber === 'number' && Number.isFinite(asNumber) ? asNumber : rawValue;
       continue;
     }
     out[key] = rawValue;
@@ -306,7 +314,7 @@ async function runGeminiGroundedSubcall(params: {
   maxOutputTokens: number;
   timeoutMs: number;
 }): Promise<unknown> {
-  const maxAttempts = 3;
+  const maxAttempts = 4;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const waitForRateLimit = checkGeminiRateLimit();
     if (waitForRateLimit > 0) {
@@ -315,9 +323,18 @@ async function runGeminiGroundedSubcall(params: {
 
     try {
       recordGeminiRequest();
-      return await request(
+      const data = await request(
         `/models/${params.model}:generateContent`,
         {
+          system_instruction: {
+            parts: [
+              {
+                text:
+                  'You are a web research scout. Use Google Search grounding internally. ' +
+                  'Return only plain research text. Never emit tool-call syntax like call:google_search{...}.'
+              }
+            ]
+          },
           tools: [{ google_search: {} }],
           contents: [{ role: 'user', parts: [{ text: params.prompt }] }],
           generationConfig: {
@@ -326,13 +343,27 @@ async function runGeminiGroundedSubcall(params: {
         },
         { timeoutMs: params.timeoutMs }
       );
+      const finish = getGeminiFinishInfo(data);
+      const finishText = `${finish.finishReason ?? ''}\n${finish.finishMessage ?? ''}`.trim();
+      const malformedCall =
+        finish.finishReason === 'MALFORMED_FUNCTION_CALL' || /malformed function call|call:google[_:]search/i.test(finishText);
+      if (!malformedCall) {
+        return data;
+      }
+      if (attempt >= maxAttempts) {
+        return data;
+      }
+      const jitter = Math.floor(Math.random() * 1000);
+      await sleep(1500 + jitter);
+      continue;
     } catch (error) {
       const retry = shouldRetryGeminiRequest(error);
       if (!retry.retry || attempt >= maxAttempts) {
         throw error;
       }
-      const jitter = Math.floor(Math.random() * 251);
-      const exponential = 500 * 2 ** (attempt - 1);
+      const jitter = Math.floor(Math.random() * 1000);
+      const is503 = error instanceof GeminiHttpError && error.status === 503;
+      const exponential = is503 ? 5000 * 2 ** (attempt - 1) : 500 * 2 ** (attempt - 1);
       const retryAfter = retry.retryAfterMs != null ? retry.retryAfterMs : 0;
       await sleep(Math.max(exponential + jitter, retryAfter));
     }
@@ -423,7 +454,7 @@ export async function startRefinementGemini(
   }
 
   const data = await request(
-    `/models/${geminiModel}:generateContent`,
+    `/models/${geminiFastModel}:generateContent`,
     {
       contents: [
         {
@@ -487,7 +518,7 @@ export async function rewritePromptGemini(
       : input.clarifications.map((item, index) => `${index + 1}. ${item.question} → ${item.answer}`).join('\n');
 
   const data = await request(
-    `/models/${geminiModel}:generateContent`,
+    `/models/${geminiFastModel}:generateContent`,
     {
       contents: [
         {
@@ -523,23 +554,17 @@ export async function summarizeForReportGemini(
       ? 'None.'
       : input.references.map((ref) => `[${ref.n}] ${ref.title ? `${ref.title} — ` : ''}${ref.url}`).join('\n');
 
-  const basePrompt =
-    `Write a thorough summary of the following ${input.provider} research output.\n` +
-    `- Use neutral, factual language.\n` +
-    `- Aim for 2–4 paragraphs and complete sentences.\n` +
-    `- Do NOT cut off mid-sentence.\n` +
-    (includeRefs
-      ? `- If you make a factual claim that is supported by a reference, add a citation like [3].\n` +
-        `- Use ONLY the reference numbers provided below.\n` +
-        `- Do NOT invent citations.\n`
-      : `- Do NOT include citations.\n`) +
-    `- Do NOT include a title or bullet points.\n\n` +
-    `REFERENCES:\n${refsText}\n\n` +
-    `RESEARCH OUTPUT:\n${input.researchText.trim().slice(0, 12000)}`;
+  const SEGMENT_CHAR_LIMIT = 8000;
+  const fullText = input.researchText.trim();
+  const segments: string[] = [];
+  for (let cursor = 0; cursor < fullText.length; cursor += SEGMENT_CHAR_LIMIT) {
+    segments.push(fullText.slice(cursor, cursor + SEGMENT_CHAR_LIMIT));
+  }
+  if (segments.length === 0) segments.push('');
 
   const call = async (prompt: string, maxOutputTokens: number) => {
     const data = await request(
-      `/models/${geminiModel}:generateContent`,
+      `/models/${geminiFastModel}:generateContent`,
       {
         contents: [
           {
@@ -556,23 +581,100 @@ export async function summarizeForReportGemini(
     return { text, finishReason: finish.finishReason };
   };
 
-  const first = await call(basePrompt, 2000);
-  const truncated =
-    (first.finishReason && first.finishReason.toLowerCase().includes('max')) || looksTruncated(first.text);
-  if (!truncated) {
-    return first.text;
+  const systemHeader =
+    `Write a thorough summary of the following ${input.provider} research output.\n` +
+    `- Use neutral, factual language.\n` +
+    `- Aim for complete sentences with no cut-offs.\n` +
+    (includeRefs
+      ? `- Add inline citations like [3] for claims supported by a reference. Use ONLY the numbers below. Do NOT invent citations.\n`
+      : `- Do NOT include citations.\n`) +
+    `- Do NOT include a title or bullet points.\n\n` +
+    `REFERENCES:\n${refsText}\n\n`;
+
+  const parts: string[] = [];
+  let previousTail = '';
+
+  for (let i = 0; i < segments.length; i++) {
+    const isFirst = i === 0;
+    const isLast = i === segments.length - 1;
+    const segment = segments[i] ?? '';
+
+    const continuationPrefix = previousTail
+      ? `Continue the summary without repeating. Here is the end of what was written so far (do not repeat):\n\n${previousTail}\n\n---\n\n`
+      : '';
+
+    const segmentRole = isFirst
+      ? 'RESEARCH OUTPUT (part 1 of ' + segments.length + '):'
+      : `RESEARCH OUTPUT (part ${i + 1} of ${segments.length}):`;
+
+    const isLastInstruction = isLast
+      ? '\n- This is the final segment. Ensure the summary ends with a complete sentence.'
+      : '\n- More segments follow. Do NOT write a concluding sentence yet. Stop cleanly at a sentence boundary.';
+
+    const prompt = `${continuationPrefix}${systemHeader}${segmentRole}${isLastInstruction}\n\n${segment}`;
+    const result = await call(prompt, 2500);
+    parts.push(result.text);
+
+    const truncated =
+      (result.finishReason && result.finishReason.toLowerCase().includes('max')) || looksTruncated(result.text);
+
+    if (truncated) {
+      const tail = result.text.slice(-900);
+      const continuationPrompt =
+        `Continue the summary without repeating any sentences.\n` +
+        `- Return ONLY the continuation text.\n` +
+        `- Ensure the text ends with a complete sentence.\n\n` +
+        `PREVIOUS SUMMARY TAIL (do not repeat):\n${tail}\n\n` +
+        systemHeader +
+        `RESEARCH OUTPUT (continuation of part ${i + 1}):\n\n${segment.slice(-3000)}`;
+      const cont = await call(continuationPrompt, 1500);
+      parts.push(cont.text);
+      previousTail = cont.text.slice(-900);
+    } else {
+      previousTail = result.text.slice(-900);
+    }
   }
 
-  const tail = first.text.slice(-900);
-  const continuationPrompt =
-    `Continue the summary without repeating any sentences.\n` +
-    `- Return ONLY the continuation text.\n` +
-    `- Ensure the final output ends with a complete sentence.\n\n` +
-    `PREVIOUS SUMMARY (do not repeat):\n${tail}\n\n` +
-    basePrompt;
+  return parts.join('\n\n').trim();
+}
 
-  const second = await call(continuationPrompt, 1200);
-  return `${first.text}\n\n${second.text}`.trim();
+export async function generateModelComparisonGemini(
+  input: {
+    openaiReport: string;
+    geminiReport: string;
+    topic: string;
+  },
+  opts?: { stub?: boolean; timeoutMs?: number }
+): Promise<string> {
+  if (opts?.stub) {
+    return `Stub comparison for topic: ${input.topic}.`;
+  }
+
+  const openaiExcerpt = input.openaiReport.trim().slice(0, 5000);
+  const geminiExcerpt = input.geminiReport.trim().slice(0, 5000);
+
+  const prompt =
+    `You are a senior research analyst comparing two independent AI-generated research reports on the same topic.\n\n` +
+    `RESEARCH TOPIC: ${input.topic}\n\n` +
+    `OPENAI REPORT EXCERPT:\n${openaiExcerpt}\n\n` +
+    `GEMINI REPORT EXCERPT:\n${geminiExcerpt}\n\n` +
+    `Write a concise but thorough comparison section with the following subsections:\n` +
+    `1. **Key Agreements** - Major findings both reports agree on.\n` +
+    `2. **Notable Differences** - Conclusions or emphasis where the reports diverge.\n` +
+    `3. **Unique OpenAI Insights** - Important information only the OpenAI report covers.\n` +
+    `4. **Unique Gemini Insights** - Important information only the Gemini report covers.\n` +
+    `5. **Coverage Assessment** - Brief overall assessment of depth, breadth, and reliability.\n\n` +
+    `Use neutral language. Do not repeat the full content of either report. Be specific about differences.`;
+
+  const data = await request(
+    `/models/${geminiDeepModel}:generateContent`,
+    {
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      generationConfig: { maxOutputTokens: 2000 }
+    },
+    { timeoutMs: opts?.timeoutMs }
+  );
+  return extractTextFromGemini(data).trim();
 }
 
 export async function runGemini(
@@ -792,6 +894,7 @@ export async function runGeminiReasoningStepFanOut(params: {
   queryPack: string[];
   maxOutputTokens: number;
   model?: string;
+  subcallModel?: string;
   timeoutMs?: number;
   maxParallelSubcalls?: number;
   maxSubcalls?: number;
@@ -804,6 +907,7 @@ export async function runGeminiReasoningStepFanOut(params: {
   rankedSources: RankedSource[];
 }> {
   const model = params.model || geminiFastModel;
+  const subcallModel = params.subcallModel || geminiSubcallModel || model;
   const totalBudgetMs =
     typeof params.timeoutMs === 'number' && params.timeoutMs > 0 ? params.timeoutMs : GEMINI_DEFAULT_TIMEOUT_MS;
   const startMs = Date.now();
@@ -821,7 +925,7 @@ export async function runGeminiReasoningStepFanOut(params: {
     .slice(0, maxSubcalls);
   const subquestions = queryPack.length > 0 ? queryPack : [params.prompt.slice(0, 300)];
   const subcallResults: GeminiSubcallResult[] = [];
-  const masterPromptShort = params.prompt.slice(0, 800);
+  const masterPromptShort = params.prompt.replace(/\s+/g, ' ').trim().slice(0, 320);
   // Scout subcalls need a small, fixed budget: enough for 5-10 source citations and
   // 3-4 factual paragraphs, but small enough that 16 parallel calls don't overflow the
   // consolidation context. The user's maxOutputTokens governs the final synthesis output,
@@ -842,24 +946,22 @@ export async function runGeminiReasoningStepFanOut(params: {
       const timeoutMs = Math.max(5_000, Math.min(perSubcallBaseTimeoutMs, remainingToDeadline));
 
       const subcallPrompt =
-        'You are a web research scout. Your ONLY job is to find as many DISTINCT, HIGH-QUALITY sources as possible on the subquestion below.\n\n' +
+        'Find distinct, high-quality grounded web sources for the subquestion below.\n\n' +
         `MASTER RESEARCH QUESTION: ${masterPromptShort}\n\n` +
         `SUBQUESTION FOR THIS SCOUT CALL: ${subquestion}\n\n` +
-        'MANDATORY REQUIREMENTS - you will be penalized for missing any of these:\n' +
-        '1. You MUST search and cite at least 5 different sources from at least 4 different domains.\n' +
-        '2. Each cited source must be from a DIFFERENT website (no two citations from the same domain).\n' +
-        '3. Preferred source types IN ORDER: peer-reviewed papers, .gov/.edu sites, official institutional reports, major news outlets, reputable industry analysis.\n' +
-        '4. For EACH source you cite: state the specific fact or finding it supports, and include its URL inline as [URL].\n' +
-        '5. If a supporting and a contradicting source exist, cite BOTH.\n\n' +
-        'OUTPUT FORMAT (strictly follow this):\n' +
-        '- Write 1 short paragraph per source (3-4 sentences max per paragraph).\n' +
-        '- Each paragraph: state the finding, cite the URL inline as [URL], note source type and date if known.\n' +
-        '- Do NOT write a long narrative. Short, dense, citation-rich paragraphs only.\n' +
-        '- End with a one-line summary: "Found X sources across Y domains."';
+        'Requirements:\n' +
+        '1) Cite at least 5 sources across at least 4 domains when possible.\n' +
+        '2) For each source, provide one concrete finding and cite URL inline as [URL].\n' +
+        '3) Include contradictory evidence if found.\n' +
+        '4) Keep output dense and concise.\n' +
+        '5) Never emit any function/tool call syntax.\n\n' +
+        'Output format:\n' +
+        '- One short paragraph per source.\n' +
+        '- End with: "Found X sources across Y domains."';
 
       try {
         const data = await runGeminiGroundedSubcall({
-          model,
+          model: subcallModel,
           prompt: subcallPrompt,
           maxOutputTokens: perSubcallMaxTokens,
           timeoutMs
@@ -1017,15 +1119,13 @@ export async function runGeminiReasoningStepFanOut(params: {
       .split('\n')
       .map((line) => line.trim())
       .find((line) => line.length > 0)?.slice(0, 240) ?? 'Research step synthesis';
-  const SUBCALL_TEXT_CHAR_LIMIT = 1200;
+  const SUBCALL_TEXT_CHAR_LIMIT = 4000;
   const findings = completed
     .filter((item) => item.responseText)
     .map((item, idx) => {
       const text = item.responseText ?? '';
       const truncated =
-        idx < 4
-          ? text
-          : text.slice(0, SUBCALL_TEXT_CHAR_LIMIT) + (text.length > SUBCALL_TEXT_CHAR_LIMIT ? '... [truncated]' : '');
+        text.length > SUBCALL_TEXT_CHAR_LIMIT ? `${text.slice(0, SUBCALL_TEXT_CHAR_LIMIT)}... [truncated]` : text;
       const urlList = item.groundingChunks
         .map((c) => c.uri)
         .filter(Boolean)
@@ -1080,6 +1180,43 @@ export async function runGeminiReasoningStepFanOut(params: {
         { timeoutMs: consolidationTimeoutMs }
       );
       text = extractTextFromGemini(consolidationData).trim();
+      const MAX_CONTINUATION_PASSES = 3;
+      let continuationPass = 0;
+      while (continuationPass < MAX_CONTINUATION_PASSES && looksTruncated(text)) {
+        continuationPass += 1;
+        const tailContext = text.slice(-1200);
+        const remainingBudget = Math.max(5_000, startMs + totalBudgetMs - Date.now());
+        if (remainingBudget < 8_000) break;
+
+        const continuationPrompt =
+          'You were writing a research synthesis report and ran out of space. ' +
+          'Continue writing from exactly where you left off. Do NOT repeat any content. ' +
+          'Do NOT add a preamble or "continuing from..." header. Just continue the text.\n\n' +
+          `THE TEXT SO FAR ENDS WITH:\n...${tailContext}\n\n` +
+          'Continue directly from this point and write until the synthesis is complete. ' +
+          'End with a complete "## Sources" section listing all URLs cited.';
+
+        try {
+          const continuationData = await request(
+            `/models/${model}:generateContent`,
+            {
+              system_instruction: {
+                parts: [{ text: consolidationSystemInstruction }]
+              },
+              contents: [{ role: 'user', parts: [{ text: continuationPrompt }] }],
+              generationConfig: {
+                maxOutputTokens: Math.min(8000, consolidationOutputTokens)
+              }
+            },
+            { timeoutMs: Math.min(consolidationBudgetMs, remainingBudget) }
+          );
+          const continuationText = extractTextFromGemini(continuationData).trim();
+          if (!continuationText) break;
+          text = `${text}\n\n${continuationText}`;
+        } catch {
+          break;
+        }
+      }
     } catch {
       // Consolidation failed: fall back to scout concatenation and always append all URLs.
       const allUrls = mergedChunks

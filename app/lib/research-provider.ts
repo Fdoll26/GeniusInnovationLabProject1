@@ -1,5 +1,6 @@
 import {
   extractGeminiGroundingMetadata,
+  looksTruncated,
   runGemini,
   runGeminiReasoningStep,
   runGeminiReasoningStepFanOut
@@ -40,6 +41,18 @@ type ExecutionInput = {
   maxOutputTokens: number;
   maxCandidates: number;
   shortlistSize: number;
+};
+
+const GAP_CHECK_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    missing_sections: { type: 'array', items: { type: 'string' } },
+    weak_claims: { type: 'array', items: { type: 'string' } },
+    missing_primary_sources: { type: 'array', items: { type: 'string' } },
+    follow_up_queries: { type: 'array', items: { type: 'string' } },
+    severe_gaps: { type: 'boolean' }
+  },
+  required: ['missing_sections', 'weak_claims', 'missing_primary_sources', 'follow_up_queries', 'severe_gaps']
 };
 
 function hash(input: string): number {
@@ -233,25 +246,77 @@ async function runFastReasoning(params: {
     };
   }
 
-  if ((params.useSearch ?? true) && !params.structuredOutput) {
-    const out = await runGeminiReasoningStepFanOut({
+  if (params.useSearch ?? true) {
+    const geminiCfg = getResearchProviderConfig('gemini');
+
+    if (params.structuredOutput?.schemaName === 'research_plan') {
+      // Plan generation should not consume scout synthesis text as prior findings.
+      const out = await runGeminiReasoningStep({
+        prompt: params.prompt,
+        timeoutMs: params.timeoutMs,
+        maxOutputTokens: params.maxOutputTokens,
+        model: params.model,
+        useSearch: false,
+        structuredOutput: params.structuredOutput
+      });
+      return {
+        text: out.text,
+        usage: out.usage ?? null,
+        rawSources: out.sources ?? null,
+        providerNativeOutput: out.text,
+        providerNativeCitationMetadata: out.groundingMetadata ?? null
+      };
+    }
+
+    if (!params.structuredOutput) {
+      const out = await runGeminiReasoningStepFanOut({
+        prompt: params.prompt,
+        queryPack: params.queryPack ?? [],
+        timeoutMs: params.timeoutMs,
+        maxOutputTokens: params.maxOutputTokens,
+        model: params.model,
+        subcallModel: geminiCfg.fast_model,
+        maxSubcalls: Math.min(30, params.queryPack?.length ?? 30),
+        maxParallelSubcalls: 6
+      });
+      return {
+        text: out.text,
+        usage: out.usage ?? null,
+        rawSources: out.sources ?? null,
+        providerNativeOutput: out.text,
+        providerNativeCitationMetadata: (out.sources as { groundingMetadata?: unknown } | null)?.groundingMetadata ?? null,
+        subcallResults: out.subcallResults,
+        coverageMetrics: out.coverageMetrics,
+        rankedSources: out.rankedSources
+      };
+    }
+
+    const fanOut = await runGeminiReasoningStepFanOut({
       prompt: params.prompt,
       queryPack: params.queryPack ?? [],
       timeoutMs: params.timeoutMs,
+      maxOutputTokens: Math.min(params.maxOutputTokens, 4000),
+      model: params.model,
+      subcallModel: geminiCfg.fast_model,
+      maxSubcalls: Math.min(15, params.queryPack?.length ?? 15),
+      maxParallelSubcalls: 4
+    });
+    const structuredResult = await runGeminiReasoningStep({
+      prompt: `Based on these research findings:\n\n${fanOut.text.slice(0, 8000)}\n\n${params.prompt}`,
       maxOutputTokens: params.maxOutputTokens,
       model: params.model,
-      maxSubcalls: Math.min(30, params.queryPack?.length ?? 30),
-      maxParallelSubcalls: 6
+      useSearch: false,
+      structuredOutput: params.structuredOutput
     });
     return {
-      text: out.text,
-      usage: out.usage ?? null,
-      rawSources: out.sources ?? null,
-      providerNativeOutput: out.text,
-      providerNativeCitationMetadata: (out.sources as { groundingMetadata?: unknown } | null)?.groundingMetadata ?? null,
-      subcallResults: out.subcallResults,
-      coverageMetrics: out.coverageMetrics,
-      rankedSources: out.rankedSources
+      text: structuredResult.text,
+      usage: structuredResult.usage ?? null,
+      rawSources: fanOut.sources ?? null,
+      providerNativeOutput: structuredResult.text,
+      providerNativeCitationMetadata: fanOut.sources ?? null,
+      subcallResults: fanOut.subcallResults,
+      coverageMetrics: fanOut.coverageMetrics,
+      rankedSources: fanOut.rankedSources
     };
   }
 
@@ -270,6 +335,104 @@ async function runFastReasoning(params: {
     rawSources: out.sources ?? null,
     providerNativeOutput: out.text,
     providerNativeCitationMetadata: out.groundingMetadata ?? null
+  };
+}
+
+async function runGeminiSectionSynthesis(params: {
+  prompt: string;
+  queryPack: string[];
+  timeoutMs: number;
+  maxOutputTokens: number;
+  model: string;
+}): Promise<{
+  text: string;
+  usage: unknown;
+  rawSources: unknown;
+  providerNativeOutput: string;
+  providerNativeCitationMetadata: unknown;
+  subcallResults?: GeminiSubcallResult[];
+  coverageMetrics?: GeminiCoverageMetrics;
+  rankedSources?: RankedSource[];
+}> {
+  const geminiCfg = getResearchProviderConfig('gemini');
+  const fanOut = await runGeminiReasoningStepFanOut({
+    prompt: params.prompt,
+    queryPack: params.queryPack,
+    timeoutMs: params.timeoutMs,
+    maxOutputTokens: params.maxOutputTokens,
+    model: params.model,
+    subcallModel: geminiCfg.fast_model,
+    maxSubcalls: Math.min(30, params.queryPack.length),
+    maxParallelSubcalls: 6
+  });
+
+  if (!looksTruncated(fanOut.text) && fanOut.text.length > 500) {
+    return {
+      text: fanOut.text,
+      usage: fanOut.usage ?? null,
+      rawSources: fanOut.sources ?? null,
+      providerNativeOutput: fanOut.text,
+      providerNativeCitationMetadata: (fanOut.sources as { groundingMetadata?: unknown } | null)?.groundingMetadata ?? null,
+      subcallResults: fanOut.subcallResults,
+      coverageMetrics: fanOut.coverageMetrics,
+      rankedSources: fanOut.rankedSources
+    };
+  }
+
+  const SEGMENT_SIZE = 6000;
+  const fullFindings = fanOut.text;
+  const segments: string[] = [];
+  for (let cursor = 0; cursor < fullFindings.length; cursor += SEGMENT_SIZE) {
+    segments.push(fullFindings.slice(cursor, cursor + SEGMENT_SIZE));
+  }
+  if (segments.length === 0) segments.push(fullFindings);
+
+  const reportParts: string[] = [];
+  let previousTail = '';
+  const perSegmentMs = Math.max(30_000, Math.floor(params.timeoutMs / (segments.length + 1)));
+
+  for (let i = 0; i < segments.length; i += 1) {
+    const isFirst = i === 0;
+    const isLast = i === segments.length - 1;
+    const continuationContext = previousTail
+      ? `Continue the report seamlessly. The previous section ended with:\n...${previousTail}\n\nDo NOT repeat any content already written. Continue directly.\n\n`
+      : '';
+    const segmentInstruction = isLast
+      ? 'This is the final segment. Complete the synthesis and end with a full "## Sources" section listing every URL cited.'
+      : 'More research segments follow. Write this section completely but do not write a conclusion or Sources section yet.';
+    const segmentPrompt =
+      `${continuationContext}` +
+      `${isFirst ? `${params.prompt}\n\n` : ''}` +
+      `RESEARCH FINDINGS (segment ${i + 1} of ${segments.length}):\n${segments[i]}\n\n` +
+      segmentInstruction;
+
+    try {
+      const segmentData = await runGeminiReasoningStep({
+        prompt: segmentPrompt,
+        maxOutputTokens: 8000,
+        model: params.model,
+        useSearch: false,
+        timeoutMs: perSegmentMs
+      });
+      reportParts.push(segmentData.text);
+      previousTail = segmentData.text.slice(-800);
+    } catch (error) {
+      reportParts.push(
+        `\n[Section ${i + 1} generation failed: ${error instanceof Error ? error.message : String(error)}]\n`
+      );
+    }
+  }
+
+  const combinedText = reportParts.join('\n\n');
+  return {
+    text: combinedText,
+    usage: fanOut.usage ?? null,
+    rawSources: fanOut.sources ?? null,
+    providerNativeOutput: combinedText,
+    providerNativeCitationMetadata: (fanOut.sources as { groundingMetadata?: unknown } | null)?.groundingMetadata ?? null,
+    subcallResults: fanOut.subcallResults,
+    coverageMetrics: fanOut.coverageMetrics,
+    rankedSources: fanOut.rankedSources
   };
 }
 
@@ -700,15 +863,19 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
   const providerCfg = getResearchProviderConfig(input.provider);
   const stepCfg = providerCfg.steps[input.stepType];
   const model = stepCfg.model_tier === 'deep' ? providerCfg.deep_model : providerCfg.fast_model;
-  const outputTokens = Math.max(
-    300,
-    Math.min(
-      input.provider === 'gemini' && stepCfg.model_tier !== 'deep'
-        ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 6000)
-        : input.maxOutputTokens,
-      stepCfg.max_output_tokens
-    )
-  );
+  const isGeminiPlanStep =
+    input.provider === 'gemini' && stepCfg.model_tier !== 'deep' && input.stepType === 'DEVELOP_RESEARCH_PLAN';
+  const outputTokens = isGeminiPlanStep
+    ? 8000
+    : Math.max(
+        300,
+        Math.min(
+          input.provider === 'gemini' && stepCfg.model_tier !== 'deep'
+            ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 6000)
+            : input.maxOutputTokens,
+          stepCfg.max_output_tokens
+        )
+      );
   const promptDef = buildStepPrompt(input);
   const currentPlanStep = input.plan?.steps?.find((s) => s.step_type === input.stepType);
   const queryPack: string[] =
@@ -717,7 +884,15 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
       : buildDefaultQueryPack(input.stepType, input.question, input.priorStepSummary, input.provider);
 
   const runResult =
-    stepCfg.model_tier === 'deep'
+    input.provider === 'gemini' && input.stepType === 'SECTION_SYNTHESIS'
+      ? await runGeminiSectionSynthesis({
+          prompt: promptDef.prompt,
+          queryPack,
+          timeoutMs: input.timeoutMs,
+          maxOutputTokens: outputTokens,
+          model
+        })
+      : stepCfg.model_tier === 'deep'
       ? await runDeep({
           provider: input.provider,
           prompt: promptDef.prompt,
@@ -739,6 +914,11 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
                   schemaName: 'research_plan',
                   jsonSchema: RESEARCH_PLAN_SCHEMA
                 }
+              : input.stepType === 'GAP_CHECK'
+                ? {
+                    schemaName: 'gap_check',
+                    jsonSchema: GAP_CHECK_SCHEMA
+                  }
               : undefined
         });
 
@@ -749,8 +929,14 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
     citationMetadata: runResult.providerNativeCitationMetadata ?? null,
     sources: runResult.rawSources ?? null
   });
+  const outputText = normalized.outputTextWithRefs || rawText;
+  const halfLen = Math.floor(outputText.length / 2);
+  const deduplicatedOutput =
+    outputText.length > 200 && outputText.slice(0, halfLen).trim() === outputText.slice(halfLen).trim()
+      ? outputText.slice(0, halfLen).trim()
+      : outputText;
   const citations = normalizeCitations(input.provider, rawText, runResult.rawSources, input.maxCandidates);
-  let evidence = evidenceFromText(normalized.outputTextWithRefs || rawText, citations);
+  let evidence = evidenceFromText(deduplicatedOutput, citations);
   let structuredOutput: Record<string, unknown> | null = null;
   let updatedPlan: ResearchPlan | null = null;
 
@@ -828,8 +1014,8 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
   return {
     step_goal: `Execute ${input.stepType.replace(/_/g, ' ').toLowerCase()}`,
     inputs_summary: compactSummary(`${input.stepType} | sourceTarget=${input.sourceTarget} | maxTokens=${outputTokens}`),
-    raw_output_text: normalized.outputTextWithRefs || rawText,
-    output_text_with_refs: normalized.outputTextWithRefs || rawText,
+    raw_output_text: deduplicatedOutput,
+    output_text_with_refs: deduplicatedOutput,
     references: normalized.references,
     citations,
     consulted_sources: Array.isArray((runResult.rawSources as Record<string, unknown> | null)?.web_search_call_sources)

@@ -16,7 +16,8 @@ vi.mock('../../app/lib/refinement-repo', () => ({
   listQuestions: vi.fn(async () => [])
 }));
 vi.mock('../../app/lib/openai-client', () => ({
-  rewritePrompt: vi.fn(async () => 'Refined prompt')
+  rewritePrompt: vi.fn(async () => 'Refined prompt'),
+  generateModelComparisonOpenAI: vi.fn(async () => 'comparison')
 }));
 vi.mock('../../app/lib/debug', () => ({
   getDebugFlags: vi.fn(async () => ({ stubRefiner: true }))
