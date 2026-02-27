@@ -6,10 +6,15 @@ import { getEnv, getEnvInt, getEnvNumber } from './env';
 const openaiApiKey = getEnv('OPENAI_API_KEY');
 const openaiApiBase =
   getEnv('OPENAI_API_BASE') || 'https://api.openai.com/v1';
-const refinerModel = getEnv('OPENAI_REFINER_MODEL') || 'gpt-4.1-mini';
-const summaryModel = getEnv('OPENAI_SUMMARY_MODEL') || refinerModel;
-const deepResearchModel = getEnv('OPENAI_DEEP_RESEARCH_MODEL') || 'o3-deep-research';
-const deepResearchFallbackModel = getEnv('OPENAI_DEEP_RESEARCH_FALLBACK_MODEL') || null;
+const refinerModel = getEnv('OPENAI_REFINER_MODEL') || 'gpt-4.1-mini'; // kept for backward compat
+const nanoModel = getEnv('OPENAI_NANO_MODEL') || 'gpt-5-nano';
+const miniModel = getEnv('OPENAI_MINI_MODEL') || 'gpt-5-mini';
+const fullModel = getEnv('OPENAI_FULL_MODEL') || 'gpt-5';
+const proModel = getEnv('OPENAI_PRO_MODEL') || 'gpt-5-pro';
+const summaryModel = getEnv('OPENAI_SUMMARY_MODEL') || miniModel || nanoModel;
+const deepResearchModel = getEnv('OPENAI_DEEP_RESEARCH_MODEL') || proModel;
+const deepResearchFallbackModel = getEnv('OPENAI_DEEP_RESEARCH_FALLBACK_MODEL') || fullModel;
+export const legacyOpenAiRefinerModel = refinerModel;
 const maxToolCalls = getEnvNumber('OPENAI_MAX_TOOL_CALLS');
 const requestTimeoutMs = getEnvNumber('OPENAI_REQUEST_TIMEOUT_MS') ?? 10 * 60 * 1000;
 const headersTimeoutMs = getEnvNumber('OPENAI_HEADERS_TIMEOUT_MS') ?? 10 * 60 * 1000;
@@ -643,7 +648,7 @@ export async function startRefinement(topic: string, opts?: { stub?: boolean; ti
     };
   }
   const data = await request('/responses', {
-    model: refinerModel,
+    model: miniModel,
     input:
       'You are a Research Question Refinement Assistant.\n' +
       "Your task is to improve the clarity, specificity, and research-readiness of a user’s research question before it is sent to a deep research model.\n\n" +
@@ -698,6 +703,7 @@ export async function runResearch(
     timeoutMs?: number;
     maxSources?: number;
     reasoningLevel?: ReasoningLevel;
+    model?: string;
     onStarted?: (info: { responseId: string; status: string | null }) => void | Promise<void>;
   }
 ): Promise<ResearchResponse> {
@@ -737,18 +743,19 @@ export async function runResearch(
     : `${depthText}\n\n${refinedPrompt}`;
 
   const mappedEffort = (() => {
-    if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
+    const modelToCheck = opts?.model || deepResearchModel;
+    if (!opts?.reasoningLevel || !/^o\d/i.test(modelToCheck)) {
       return null;
     }
     // Some Deep Research models only accept specific effort values.
-    if (deepResearchModel.includes('o4-mini-deep-research')) {
+    if (modelToCheck.includes('o4-mini-deep-research')) {
       return 'medium' as const;
     }
     return opts.reasoningLevel as ReasoningEffort;
   })();
   const reasoning = mappedEffort ? { effort: mappedEffort } : undefined;
 
-  const body = buildDeepResearchBody(legacyInput, reasoning);
+  const body = buildDeepResearchBody(legacyInput, reasoning, opts?.model);
   try {
     const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
     let started: { responseId: string | null; status: string | null; data: unknown };
@@ -756,7 +763,8 @@ export async function runResearch(
       try {
         return await startDeepResearch(messageInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -765,7 +773,8 @@ export async function runResearch(
         }
         return await startDeepResearch(legacyInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       }
     };
@@ -860,10 +869,11 @@ export async function startResearchJob(
   const legacyInput = sourceBudgetText ? `${sourceBudgetText}\n\n${refinedPrompt}` : refinedPrompt;
 
   const mappedEffort = (() => {
-    if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
+    const modelToCheck = opts?.model || deepResearchModel;
+    if (!opts?.reasoningLevel || !/^o\d/i.test(modelToCheck)) {
       return null;
     }
-    if (deepResearchModel.includes('o4-mini-deep-research')) {
+    if (modelToCheck.includes('o4-mini-deep-research')) {
       return 'medium' as const;
     }
     return opts.reasoningLevel as ReasoningEffort;
@@ -1021,7 +1031,7 @@ export async function rewritePrompt(
   const data = await request(
     '/responses',
     {
-      model: refinerModel,
+      model: miniModel,
       input:
         'Rewrite the user prompt into a clear, detailed research prompt. ' +
         'Include constraints from clarifications. Return only the rewritten prompt.\n\n' +
@@ -1098,7 +1108,7 @@ export async function generateModelComparisonOpenAI(
   const data = await request(
     '/responses',
     {
-      model: summaryModel,
+      model: fullModel,
       input:
         `You are a senior research analyst comparing two independent AI-generated research reports on the same topic.\n\n` +
         `RESEARCH TOPIC: ${input.topic}\n\n` +
@@ -1136,7 +1146,7 @@ export async function runOpenAiReasoningStep(params: {
   sources?: unknown;
 }> {
   const body: Record<string, unknown> = {
-    model: params.model || refinerModel,
+    model: params.model || miniModel,
     input: params.prompt,
     max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
     ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})

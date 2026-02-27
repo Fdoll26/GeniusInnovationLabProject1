@@ -14,6 +14,7 @@ import {
   waitDeepResearch
 } from './openai-client';
 import { getResearchProviderConfig } from './research-config';
+import type { ProviderResearchConfig } from './research-config';
 import { normalizeProviderCitations } from './citation-normalizer';
 import {
   buildFallbackResearchPlan,
@@ -42,6 +43,23 @@ type ExecutionInput = {
   maxCandidates: number;
   shortlistSize: number;
 };
+
+type ModelTier = ProviderResearchConfig['steps'][Exclude<StepType, 'NATIVE_SECTION'>]['model_tier'];
+
+function resolveModel(cfg: ProviderResearchConfig, tier: ModelTier): string {
+  switch (tier) {
+    case 'nano':
+      return cfg.nano_model;
+    case 'mini':
+      return cfg.mini_model;
+    case 'full':
+      return cfg.full_model;
+    case 'pro':
+      return cfg.pro_model;
+    default:
+      return cfg.mini_model;
+  }
+}
 
 const GAP_CHECK_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -275,7 +293,7 @@ async function runFastReasoning(params: {
         timeoutMs: params.timeoutMs,
         maxOutputTokens: params.maxOutputTokens,
         model: params.model,
-        subcallModel: geminiCfg.fast_model,
+        subcallModel: geminiCfg.mini_model,
         maxSubcalls: Math.min(30, params.queryPack?.length ?? 30),
         maxParallelSubcalls: 6
       });
@@ -297,7 +315,7 @@ async function runFastReasoning(params: {
       timeoutMs: params.timeoutMs,
       maxOutputTokens: Math.min(params.maxOutputTokens, 4000),
       model: params.model,
-      subcallModel: geminiCfg.fast_model,
+      subcallModel: geminiCfg.mini_model,
       maxSubcalls: Math.min(15, params.queryPack?.length ?? 15),
       maxParallelSubcalls: 4
     });
@@ -361,7 +379,7 @@ async function runGeminiSectionSynthesis(params: {
     timeoutMs: params.timeoutMs,
     maxOutputTokens: params.maxOutputTokens,
     model: params.model,
-    subcallModel: geminiCfg.fast_model,
+    subcallModel: geminiCfg.mini_model,
     maxSubcalls: Math.min(30, params.queryPack.length),
     maxParallelSubcalls: 6
   });
@@ -862,15 +880,16 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
 > {
   const providerCfg = getResearchProviderConfig(input.provider);
   const stepCfg = providerCfg.steps[input.stepType];
-  const model = stepCfg.model_tier === 'deep' ? providerCfg.deep_model : providerCfg.fast_model;
+  const model = resolveModel(providerCfg, stepCfg.model_tier);
+  const isDeepTier = stepCfg.model_tier === 'full' || stepCfg.model_tier === 'pro';
   const isGeminiPlanStep =
-    input.provider === 'gemini' && stepCfg.model_tier !== 'deep' && input.stepType === 'DEVELOP_RESEARCH_PLAN';
+    input.provider === 'gemini' && !isDeepTier && input.stepType === 'DEVELOP_RESEARCH_PLAN';
   const outputTokens = isGeminiPlanStep
     ? 8000
     : Math.max(
         300,
         Math.min(
-          input.provider === 'gemini' && stepCfg.model_tier !== 'deep'
+          input.provider === 'gemini' && !isDeepTier
             ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 6000)
             : input.maxOutputTokens,
           stepCfg.max_output_tokens
@@ -882,6 +901,13 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
     currentPlanStep?.search_query_pack?.length && Array.isArray(currentPlanStep.search_query_pack)
       ? currentPlanStep.search_query_pack
       : buildDefaultQueryPack(input.stepType, input.question, input.priorStepSummary, input.provider);
+  const noSearchSteps: Array<Exclude<StepType, 'NATIVE_SECTION'>> = [
+    'DEVELOP_RESEARCH_PLAN',
+    'SHORTLIST_RESULTS',
+    'EXTRACT_EVIDENCE',
+    'GAP_CHECK'
+  ];
+  const useSearchForStep = !noSearchSteps.includes(input.stepType);
 
   const runResult =
     input.provider === 'gemini' && input.stepType === 'SECTION_SYNTHESIS'
@@ -892,7 +918,7 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
           maxOutputTokens: outputTokens,
           model
         })
-      : stepCfg.model_tier === 'deep'
+      : isDeepTier
       ? await runDeep({
           provider: input.provider,
           prompt: promptDef.prompt,
@@ -906,7 +932,7 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
           timeoutMs: input.timeoutMs,
           maxOutputTokens: outputTokens,
           model,
-          useSearch: true,
+          useSearch: useSearchForStep,
           queryPack,
           structuredOutput:
             input.stepType === 'DEVELOP_RESEARCH_PLAN'
@@ -1024,7 +1050,7 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
     provider_native_output: runResult.providerNativeOutput ?? rawText,
     provider_native_citation_metadata: runResult.providerNativeCitationMetadata ?? null,
     evidence,
-    tools_used: [input.provider === 'openai' ? 'web_search_preview' : 'google_search'],
+    tools_used: useSearchForStep ? [input.provider === 'openai' ? 'web_search_preview' : 'google_search'] : [],
     token_usage: runResult.usage as Record<string, unknown> | null,
     model_used: model,
     next_step_hint: hint,
@@ -1135,7 +1161,7 @@ export async function executeNativeResearch(params: {
   maxSources: number;
   timeoutMs: number;
 }): Promise<{ rawText: string; rawSources: unknown; citations: ResearchStepArtifact['citations'] }> {
-  const model = getResearchProviderConfig(params.provider).deep_model;
+  const model = getResearchProviderConfig(params.provider).pro_model;
   const deep = await runDeep({
     provider: params.provider,
     prompt: params.question,

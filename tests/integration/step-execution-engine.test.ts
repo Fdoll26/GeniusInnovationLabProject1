@@ -314,7 +314,7 @@ describe('step execution engine integration', () => {
       expect(nativeStep1?.citation_metadata).toBeTruthy();
     }
 
-    expect(runOpenAiReasoningStep).toHaveBeenCalledWith(expect.objectContaining({ useWebSearch: true }));
+    expect(runOpenAiReasoningStep).toHaveBeenCalledWith(expect.objectContaining({ useWebSearch: false }));
     expect(runGeminiReasoningStep).toHaveBeenCalledWith(
       expect.objectContaining({ useSearch: false, model: 'gemini-2.0-flash' })
     );
