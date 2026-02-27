@@ -675,44 +675,20 @@ export async function startRefinement(topic: string, opts?: { stub?: boolean; ti
   const data = await request('/responses', {
     model: miniModel,
     input:
-      'You are a Research Question Refinement Assistant.\n' +
-      "Your task is to improve the clarity, specificity, and research-readiness of a user’s research question before it is sent to a deep research model.\n\n" +
-      'Your Responsibilities\n\n' +
-      '1. Assess the Input Question\n' +
-      ' - Determine whether the question is:\n' +
-      ' - Clear and specific\n' +
-      ' - Too broad\n' +
-      '  - Ambiguous\n' +
-      ' - Missing important constraints (timeframe, geography, population, context, definitions, etc.)\n\n' +
-      '2. If Clarification Is Needed\n' +
-      ' - Ask concise, targeted clarifying questions.\n' +
-      ' - Only ask questions that materially improve research quality.\n' +
-      ' - Limit to 1–5 high-impact clarifying questions.\n' +
-      ' - Do NOT explain why you are asking.\n' +
-      ' - Do NOT attempt to answer the research question yet.\n\n' +
-      '3. If No Clarification Is Needed\n' +
-      ' - Output NONE.\n\n' +
-      'Output Rules\n' +
-      'You must output in ONE of the following two formats:\n\n' +
-      'Format A: Clarification Needed\n' +
+      'You are a Research Question Refiner for deep-research workflows.\n' +
+      'Goal: make the question precise enough that step-by-step research produces a complete, high-quality final report.\n\n' +
+      'Decision:\n' +
+      '- If the question is already research-ready, output EXACTLY: NONE\n' +
+      '- Otherwise output:\n' +
       'CLARIFICATION REQUIRED:\n' +
-      '1. [Question]\n' +
-      '2. [Question]\n' +
-      '3. [Question]\n\n' +
-      'Format B: No Clarification Needed\n' +
-      'NONE\n\n' +
-      'Do not output anything else.\n' +
-      'Do not include explanations.\n' +
-      'Do not include commentary.\n' +
-      'Do not answer the research question.\n\n' +
-      'Evaluation Criteria\n' +
-      ' - A research-ready question should:\n' +
-      ' - Be specific and bounded\n' +
-      ' - Identify relevant population, variables, or domain\n' +
-      ' - Avoid vague terms (e.g., “better,” “impact,” “effective” without context)\n' +
-      ' - Avoid unnecessary breadth\n' +
-      ' - Be suitable for deep, structured research\n\n' +
-      'If the user input is not a research question, reformulate it into one when possible.\n\n' +
+      '1. ...\n' +
+      '2. ...\n\n' +
+      'Rules:\n' +
+      '- Ask 1-5 questions max.\n' +
+      '- Ask only high-impact questions that change research results.\n' +
+      '- Prioritize: timeframe, geography, scope (entities/population), comparison baseline, success criteria, and desired output format.\n' +
+      '- No explanations, no answers, no meta-commentary.\n' +
+      '- Do not write anything except NONE or CLARIFICATION REQUIRED with numbered questions.\n\n' +
       `USER INPUT:\n${topic}`
   }, opts?.timeoutMs ? { requestTimeoutMs: opts.timeoutMs, headersTimeoutMs: opts.timeoutMs, bodyTimeoutMs: opts.timeoutMs } : undefined);
   const parsed = parseRefinementOutput(extractOutputText(data));
@@ -741,7 +717,7 @@ export async function runResearch(
       : null;
   const sourceBudgetText =
     maxSources != null
-      ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
+      ? `SOURCE COVERAGE TARGET: Use at least ${maxSources} distinct high-quality sources when available. Exceed this target if needed for completeness, contradiction checks, and full coverage. Prefer primary sources and highly reputable secondary sources.`
       : null;
   const depthText =
     'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
@@ -875,7 +851,7 @@ export async function startResearchJob(
       : null;
   const sourceBudgetText =
     maxSources != null
-      ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
+      ? `SOURCE COVERAGE TARGET: Use at least ${maxSources} distinct high-quality sources when available. Exceed this target if needed for completeness, contradiction checks, and full coverage. Prefer primary sources and highly reputable secondary sources.`
       : null;
   const messageInput = [
     ...(sourceBudgetText
@@ -1058,8 +1034,11 @@ export async function rewritePrompt(
     {
       model: miniModel,
       input:
-        'Rewrite the user prompt into a clear, detailed research prompt. ' +
-        'Include constraints from clarifications. Return only the rewritten prompt.\n\n' +
+        'Rewrite the user prompt into ONE high-impact deep-research prompt that maximizes completeness and insight.\n' +
+        'Include constraints from clarifications.\n' +
+        'Do NOT impose artificial brevity, source-count caps, or output-length limits.\n' +
+        'Require full evidence coverage, opposing viewpoints, and explicit uncertainties.\n' +
+        'Return only the rewritten prompt.\n\n' +
         `Original topic: ${input.topic}\n` +
         `Draft prompt: ${input.draftPrompt}\n` +
         `Clarifications:\n${clarificationsText}`
@@ -1173,7 +1152,7 @@ export async function runOpenAiReasoningStep(params: {
   const body: Record<string, unknown> = {
     model: params.model || miniModel,
     input: params.prompt,
-    max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
+    max_output_tokens: Math.max(200, Math.min(32768, Math.trunc(params.maxOutputTokens))),
     ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})
   };
   if (params.structuredOutput) {

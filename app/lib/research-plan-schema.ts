@@ -29,7 +29,7 @@ function normalizeStepBudget(input: unknown, fallback: ResearchPlanStepBudget): 
   const typed = input && typeof input === 'object' ? (input as Record<string, unknown>) : {};
   return {
     max_sources: asInt(typed.max_sources, fallback.max_sources, 1, 30),
-    max_tokens: asInt(typed.max_tokens, fallback.max_tokens, 300, 8000),
+    max_tokens: asInt(typed.max_tokens, fallback.max_tokens, 300, 32768),
     max_minutes: asInt(typed.max_minutes, fallback.max_minutes, 1, 120)
   };
 }
@@ -104,7 +104,7 @@ export const RESEARCH_PLAN_STEP_SCHEMA: Record<string, unknown> = {
       required: ['max_sources', 'max_tokens', 'max_minutes'],
       properties: {
         max_sources: { type: 'integer', minimum: 1, maximum: 30 },
-        max_tokens: { type: 'integer', minimum: 300, maximum: 8000 },
+        max_tokens: { type: 'integer', minimum: 300, maximum: 32768 },
         max_minutes: { type: 'integer', minimum: 1, maximum: 120 }
       }
     },

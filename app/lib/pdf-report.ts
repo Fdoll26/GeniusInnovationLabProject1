@@ -401,6 +401,59 @@ export async function buildPdfReport(
     return { headers, rows };
   };
 
+  const parseDelimitedRow = (line: string, delimiter: string): string[] => {
+    const cells: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let idx = 0; idx < line.length; idx += 1) {
+      const ch = line[idx] ?? '';
+      if (ch === '"') {
+        if (inQuotes && line[idx + 1] === '"') {
+          current += '"';
+          idx += 1;
+          continue;
+        }
+        inQuotes = !inQuotes;
+        continue;
+      }
+      if (!inQuotes && ch === delimiter) {
+        cells.push(current.trim());
+        current = '';
+        continue;
+      }
+      current += ch;
+    }
+    cells.push(current.trim());
+    return cells.map((cell) => cell.replace(/^"(.*)"$/, '$1').trim());
+  };
+
+  const isLikelyDelimitedLine = (line: string, delimiter: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith('#') || trimmed.startsWith('|') || trimmed.startsWith('>')) return false;
+    if (/^[\s]*[-*+]\s+/.test(trimmed)) return false;
+    if (/^[\s]*\d+\.\s+/.test(trimmed)) return false;
+    if (!trimmed.includes(delimiter)) return false;
+    const parsed = parseDelimitedRow(trimmed, delimiter);
+    return parsed.length >= 2;
+  };
+
+  const parseDelimitedTable = (lines: string[], delimiter: string): { headers: string[]; rows: string[][] } | null => {
+    if (lines.length < 2) return null;
+    const parsedRows = lines.map((line) => parseDelimitedRow(line, delimiter));
+    const header = parsedRows[0] ?? [];
+    if (header.length < 2) return null;
+    const colCount = header.length;
+    const normalizeRow = (row: string[]) =>
+      Array.from({ length: colCount }, (_, idx) => {
+        const val = row[idx]?.trim();
+        return val && val.length > 0 ? val : 'N/A';
+      });
+    const headers = normalizeRow(header);
+    const rows = parsedRows.slice(1).map(normalizeRow);
+    return { headers, rows };
+  };
+
   const writeWrappedTextAt = (text: string, startX: number, textMaxWidth: number) => {
     const words = text.split(/\s+/);
     let line = '';
@@ -435,14 +488,68 @@ export async function buildPdfReport(
     }
   };
 
-  const truncateCellText = (text: string, maxW: number, fontSize: number, activeFont = font): string => {
-    if (!text) return '';
-    if (activeFont.widthOfTextAtSize(text, fontSize) <= maxW) return text;
-    let truncated = text;
-    while (truncated.length > 1 && activeFont.widthOfTextAtSize(`${truncated}...`, fontSize) > maxW) {
-      truncated = truncated.slice(0, -1);
+  const wrapCellText = (text: string, maxW: number, fontSize: number, activeFont = font): string[] => {
+    const safe = sanitizePdfText(stripInlineMarkdown(text ?? '')).trim();
+    if (!safe) return [''];
+    const words = safe.split(/\s+/);
+    const linesOut: string[] = [];
+    let line = '';
+
+    const splitLongToken = (token: string): string[] => {
+      const parts: string[] = [];
+      let remaining = token;
+      while (remaining.length > 0) {
+        let lo = 1;
+        let hi = remaining.length;
+        let best = 1;
+        while (lo <= hi) {
+          const mid = Math.floor((lo + hi) / 2);
+          const chunk = remaining.slice(0, mid);
+          const w = activeFont.widthOfTextAtSize(chunk, fontSize);
+          if (w <= maxW) {
+            best = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        parts.push(remaining.slice(0, best));
+        remaining = remaining.slice(best);
+      }
+      return parts;
+    };
+
+    for (const word of words) {
+      const wordWidth = activeFont.widthOfTextAtSize(word, fontSize);
+      if (wordWidth > maxW) {
+        if (line) {
+          linesOut.push(line);
+          line = '';
+        }
+        const chunks = splitLongToken(word);
+        for (let i = 0; i < chunks.length; i += 1) {
+          if (i === chunks.length - 1) {
+            line = chunks[i] ?? '';
+          } else {
+            linesOut.push(chunks[i] ?? '');
+          }
+        }
+        continue;
+      }
+
+      const testLine = line ? `${line} ${word}` : word;
+      const lineWidth = activeFont.widthOfTextAtSize(testLine, fontSize);
+      if (lineWidth > maxW && line) {
+        linesOut.push(line);
+        line = word;
+      } else {
+        line = testLine;
+      }
     }
-    return `${truncated}${truncated.length < text.length ? '...' : ''}`;
+    if (line) {
+      linesOut.push(line);
+    }
+    return linesOut.length > 0 ? linesOut : [''];
   };
 
   const writeTable = (headers: string[], rows: string[][]) => {
@@ -452,15 +559,17 @@ export async function buildPdfReport(
     const colWidth = Math.max(80, Math.floor(maxWidth / colCount));
     const tableWidth = Math.min(maxWidth, colWidth * colCount);
     const cellPadding = 4;
-    const headerRowHeight = 20;
-    const dataRowHeight = 18;
+    const tableLineHeight = 11;
     const tableFontSize = 9;
     const headerBg = rgb(79 / 255, 70 / 255, 229 / 255);
     const rowBg1 = rgb(249 / 255, 250 / 255, 251 / 255);
     const rowBg2 = rgb(1, 1, 1);
     const borderColor = rgb(209 / 255, 213 / 255, 219 / 255);
 
-    ensureSpace(headerRowHeight + dataRowHeight + 4);
+    const headerCells = headers.map((h) => wrapCellText(h ?? '', colWidth - cellPadding * 2, tableFontSize, fontBold));
+    const headerRowHeight = cellPadding * 2 + Math.max(1, ...headerCells.map((lines) => lines.length)) * tableLineHeight;
+
+    ensureSpace(headerRowHeight + tableLineHeight + cellPadding * 2 + 4);
 
     for (let col = 0; col < colCount; col += 1) {
       const x = margin + col * colWidth;
@@ -471,15 +580,17 @@ export async function buildPdfReport(
         height: headerRowHeight,
         color: headerBg
       });
-      const headerText = sanitizePdfText(stripInlineMarkdown(headers[col] ?? ''));
-      const truncated = truncateCellText(headerText, colWidth - cellPadding * 2, tableFontSize, fontBold);
-      page.drawText(truncated, {
-        x: x + cellPadding,
-        y: y - headerRowHeight + 8,
-        size: tableFontSize,
-        font: fontBold,
-        color: rgb(1, 1, 1)
-      });
+      const headerLines = headerCells[col] ?? [''];
+      const headerStartY = y + 4 - cellPadding - tableFontSize;
+      for (let lineIdx = 0; lineIdx < headerLines.length; lineIdx += 1) {
+        page.drawText(headerLines[lineIdx] ?? '', {
+          x: x + cellPadding,
+          y: headerStartY - lineIdx * tableLineHeight,
+          size: tableFontSize,
+          font: fontBold,
+          color: rgb(1, 1, 1)
+        });
+      }
       if (col < colCount - 1) {
         page.drawRectangle({
           x: x + colWidth - 1,
@@ -501,45 +612,51 @@ export async function buildPdfReport(
 
     for (let rowIdx = 0; rowIdx < rows.length; rowIdx += 1) {
       const row = rows[rowIdx] ?? [];
-      ensureSpace(dataRowHeight + 2);
+      const rowCells = Array.from({ length: colCount }, (_, colIdx) =>
+        wrapCellText(row[colIdx] ?? '', colWidth - cellPadding * 2, tableFontSize, font)
+      );
+      const rowHeight = cellPadding * 2 + Math.max(1, ...rowCells.map((lines) => lines.length)) * tableLineHeight;
+      ensureSpace(rowHeight + 2);
       const bg = rowIdx % 2 === 0 ? rowBg1 : rowBg2;
 
       for (let col = 0; col < colCount; col += 1) {
         const x = margin + col * colWidth;
         page.drawRectangle({
           x,
-          y: y - dataRowHeight + 4,
+          y: y - rowHeight + 4,
           width: colWidth,
-          height: dataRowHeight,
+          height: rowHeight,
           color: bg
         });
-        const cellText = sanitizePdfText(stripInlineMarkdown(row[col] ?? ''));
-        const truncated = truncateCellText(cellText, colWidth - cellPadding * 2, tableFontSize, font);
-        page.drawText(truncated, {
-          x: x + cellPadding,
-          y: y - dataRowHeight + 7,
-          size: tableFontSize,
-          font,
-          color: ink
-        });
+        const cellLines = rowCells[col] ?? [''];
+        const cellStartY = y + 4 - cellPadding - tableFontSize;
+        for (let lineIdx = 0; lineIdx < cellLines.length; lineIdx += 1) {
+          page.drawText(cellLines[lineIdx] ?? '', {
+            x: x + cellPadding,
+            y: cellStartY - lineIdx * tableLineHeight,
+            size: tableFontSize,
+            font,
+            color: ink
+          });
+        }
         if (col < colCount - 1) {
           page.drawRectangle({
             x: x + colWidth - 1,
-            y: y - dataRowHeight + 4,
+            y: y - rowHeight + 4,
             width: 1,
-            height: dataRowHeight,
+            height: rowHeight,
             color: borderColor
           });
         }
       }
       page.drawRectangle({
         x: margin,
-        y: y - dataRowHeight + 3,
+        y: y - rowHeight + 3,
         width: tableWidth,
         height: 1,
         color: borderColor
       });
-      y -= dataRowHeight;
+      y -= rowHeight;
     }
 
     y -= 6;
@@ -552,11 +669,39 @@ export async function buildPdfReport(
       .split('\n');
 
     let inCodeBlock = false;
+    let inSourcesSection = false;
     let i = 0;
     while (i < lines.length) {
       const line = lines[i] ?? '';
 
       if (line.startsWith('```')) {
+        const lang = line.slice(3).trim().toLowerCase();
+        if (!inCodeBlock && !inSourcesSection && (lang === 'csv' || lang === 'tsv')) {
+          const delimiter = lang === 'tsv' ? '\t' : ',';
+          const blockLines: string[] = [];
+          i += 1;
+          while (i < lines.length && !(lines[i] ?? '').startsWith('```')) {
+            const blockLine = (lines[i] ?? '').trim();
+            if (blockLine) {
+              blockLines.push(blockLine);
+            }
+            i += 1;
+          }
+          if (i < lines.length && (lines[i] ?? '').startsWith('```')) {
+            i += 1;
+          }
+          const parsed = parseDelimitedTable(blockLines, delimiter);
+          if (parsed && parsed.headers.length > 1) {
+            y -= 4;
+            writeTable(parsed.headers, parsed.rows);
+            y -= 4;
+          } else {
+            for (const raw of blockLines) {
+              writeParagraph(stripInlineMarkdown(raw), { size: 9, color: muted });
+            }
+          }
+          continue;
+        }
         inCodeBlock = !inCodeBlock;
         i += 1;
         continue;
@@ -567,7 +712,7 @@ export async function buildPdfReport(
         continue;
       }
 
-      if (isTableLine(line)) {
+      if (!inSourcesSection && isTableLine(line)) {
         const tableLines: string[] = [];
         while (i < lines.length && (isTableLine(lines[i] ?? '') || isTableSeparator(lines[i] ?? ''))) {
           tableLines.push(lines[i] ?? '');
@@ -586,6 +731,26 @@ export async function buildPdfReport(
         continue;
       }
 
+      if (!inSourcesSection && (isLikelyDelimitedLine(line, ',') || isLikelyDelimitedLine(line, '\t'))) {
+        const delimiter = isLikelyDelimitedLine(line, '\t') ? '\t' : ',';
+        const tableLines: string[] = [];
+        while (i < lines.length && isLikelyDelimitedLine(lines[i] ?? '', delimiter)) {
+          tableLines.push((lines[i] ?? '').trim());
+          i += 1;
+        }
+        const parsed = parseDelimitedTable(tableLines, delimiter);
+        if (parsed && parsed.headers.length > 1) {
+          y -= 4;
+          writeTable(parsed.headers, parsed.rows);
+          y -= 4;
+        } else {
+          for (const raw of tableLines) {
+            writeParagraph(stripInlineMarkdown(raw), { size: 9, color: muted });
+          }
+        }
+        continue;
+      }
+
       if (!line.trim()) {
         ensureSpace(lineHeight);
         y -= Math.round(bodyFontSize * 0.5);
@@ -595,6 +760,7 @@ export async function buildPdfReport(
 
       if (line.startsWith('# ')) {
         const text = line.slice(2).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
         ensureSpace(36);
         y -= 8;
         writeLine(text, { bold: true, size: 16, color: ink });
@@ -605,6 +771,7 @@ export async function buildPdfReport(
 
       if (line.startsWith('## ')) {
         const text = line.slice(3).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
         writeSectionHeading(text, brand);
         i += 1;
         continue;
@@ -612,6 +779,7 @@ export async function buildPdfReport(
 
       if (line.startsWith('### ')) {
         const text = line.slice(4).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
         ensureSpace(26);
         y -= 4;
         writeLine(text, { bold: true, size: 13, color: ink });
@@ -622,6 +790,7 @@ export async function buildPdfReport(
 
       if (/^#{4,6} /.test(line)) {
         const text = line.replace(/^#{4,6} /, '').replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
         writeLine(text, { bold: true, size: bodyFontSize, color: ink });
         i += 1;
         continue;

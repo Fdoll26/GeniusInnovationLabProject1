@@ -789,7 +789,7 @@ function buildDefaultQueryPack(
 }
 
 function buildStepPrompt(input: ExecutionInput): { prompt: string; expectsJson: boolean } {
-  const planText = input.plan ? JSON.stringify(input.plan).slice(0, 6000) : 'null';
+  const planText = input.plan ? JSON.stringify(input.plan).slice(0, 24000) : 'null';
   const base =
     `Question:\n${input.question}\n\n` +
     `Prior step summary:\n${input.priorStepSummary || 'None yet.'}\n\n` +
@@ -888,12 +888,12 @@ export async function executePipelineStep(input: ExecutionInput): Promise<
   const isGeminiPlanStep =
     input.provider === 'gemini' && !isDeepTier && input.stepType === 'DEVELOP_RESEARCH_PLAN';
   const outputTokens = isGeminiPlanStep
-    ? 8000
+    ? 32768
     : Math.max(
         300,
         Math.min(
           input.provider === 'gemini' && !isDeepTier
-            ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 6000)
+            ? Math.min(input.maxOutputTokens * 2, stepCfg.max_output_tokens, 32768)
             : input.maxOutputTokens,
           stepCfg.max_output_tokens
         )

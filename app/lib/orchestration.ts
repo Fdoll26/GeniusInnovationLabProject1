@@ -509,7 +509,7 @@ async function ensureStubResearchRun(params: {
   const maxSteps = STEP_SEQUENCE.length;
   const targetSourcesPerStep = clamp(settings.research_target_sources_per_step, 1, 25);
   const maxTotalSources = clamp(settings.research_max_total_sources, 5, 400);
-  const maxTokensPerStep = clamp(settings.research_max_tokens_per_step, 300, 8000);
+  const maxTokensPerStep = clamp(settings.research_max_tokens_per_step, 300, 32768);
   const plan = buildFallbackResearchPlan({
     refinedTopic: params.question,
     sourceTarget: targetSourcesPerStep,

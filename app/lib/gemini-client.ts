@@ -462,37 +462,20 @@ export async function startRefinementGemini(
           parts: [
             {
               text:
-                'You are a Research Question Refinement Assistant.\n' +
-                "Your task is to improve the clarity, specificity, and research-readiness of a user’s research question before it is sent to a deep research model.\n\n" +
-                'Your Responsibilities\n\n' +
-                '1. Assess the Input Question\n' +
-                ' - Determine whether the question is:\n' +
-                ' - Clear and specific\n' +
-                ' - Too broad\n' +
-                '  - Ambiguous\n' +
-                ' - Missing important constraints (timeframe, geography, population, context, definitions, etc.)\n\n' +
-                '2. If Clarification Is Needed\n' +
-                ' - Ask concise, targeted clarifying questions.\n' +
-                ' - Only ask questions that materially improve research quality.\n' +
-                ' - Limit to 1–5 high-impact clarifying questions.\n' +
-                ' - Do NOT explain why you are asking.\n' +
-                ' - Do NOT attempt to answer the research question yet.\n\n' +
-                '3. If No Clarification Is Needed\n' +
-                ' - Output NONE.\n\n' +
-                'Output Rules\n' +
-                'You must output in ONE of the following two formats:\n\n' +
-                'Format A: Clarification Needed\n' +
+                'You are a Research Question Refiner for deep-research workflows.\n' +
+                'Goal: make the question precise enough that step-by-step research produces a complete, high-quality final report.\n\n' +
+                'Decision:\n' +
+                '- If the question is already research-ready, output EXACTLY: NONE\n' +
+                '- Otherwise output:\n' +
                 'CLARIFICATION REQUIRED:\n' +
-                '1. [Question]\n' +
-                '2. [Question]\n' +
-                '3. [Question]\n\n' +
-                'Format B: No Clarification Needed\n' +
-                'NONE\n\n' +
-                'Do not output anything else.\n' +
-                'Do not include explanations.\n' +
-                'Do not include commentary.\n' +
-                'Do not answer the research question.\n\n' +
-                'If the user input is not a research question, reformulate it into one when possible.\n\n' +
+                '1. ...\n' +
+                '2. ...\n\n' +
+                'Rules:\n' +
+                '- Ask 1-5 questions max.\n' +
+                '- Ask only high-impact questions that change research results.\n' +
+                '- Prioritize: timeframe, geography, scope (entities/population), comparison baseline, success criteria, and desired output format.\n' +
+                '- No explanations, no answers, no meta-commentary.\n' +
+                '- Do not write anything except NONE or CLARIFICATION REQUIRED with numbered questions.\n\n' +
                 `USER INPUT:\n${topic}`
             }
           ]
@@ -526,8 +509,11 @@ export async function rewritePromptGemini(
           parts: [
             {
               text:
-                'Rewrite the user prompt into a clear, detailed research prompt. ' +
-                'Include constraints from clarifications. Return only the rewritten prompt.\n\n' +
+                'Rewrite the user prompt into ONE high-impact deep-research prompt that maximizes completeness and insight.\n' +
+                'Include constraints from clarifications.\n' +
+                'Do NOT impose artificial brevity, source-count caps, or output-length limits.\n' +
+                'Require full evidence coverage, opposing viewpoints, and explicit uncertainties.\n' +
+                'Return only the rewritten prompt.\n\n' +
                 `Original topic: ${input.topic}\n` +
                 `Draft prompt: ${input.draftPrompt}\n` +
                 `Clarifications:\n${clarificationsText}`
@@ -691,7 +677,7 @@ export async function runGemini(
   const outputTokenCeiling = typeof opts?.maxOutputTokens === 'number' && opts.maxOutputTokens > 0
     ? opts.maxOutputTokens
     : 32768;
-  const sourceBudgetText = `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`;
+  const sourceBudgetText = `SOURCE COVERAGE TARGET: Use at least ${maxSources} distinct high-quality sources when available. Exceed this target if needed for completeness, contradiction checks, and full coverage. Prefer primary sources and highly reputable secondary sources.`;
   const depthText =
     'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
   const systemText = `${depthText}\n${sourceBudgetText}`;
@@ -831,7 +817,7 @@ export async function runGeminiReasoningStep(params: {
   const model = params.model || geminiModel;
   const desiredSearch = params.useSearch ?? true;
   const desiredStructured = Boolean(params.structuredOutput);
-  const maxOutputTokens = Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens)));
+  const maxOutputTokens = Math.max(200, Math.min(32768, Math.trunc(params.maxOutputTokens)));
 
   const run = async (opts: { useSearch: boolean; useStructured: boolean }) =>
     request(
@@ -1171,7 +1157,7 @@ export async function runGeminiReasoningStepFanOut(params: {
     const remainingTotalBudget = Math.max(5_000, startMs + totalBudgetMs - Date.now());
     const consolidationTimeoutMs = Math.max(15_000, Math.min(consolidationBudgetMs, remainingTotalBudget));
     // The consolidation synthesis needs tokens proportional to the number of scouts.
-    const consolidationOutputTokens = Math.min(8000, Math.max(4000, subcallsCompleted * 300));
+    const consolidationOutputTokens = Math.min(32768, Math.max(8000, subcallsCompleted * 500));
     try {
       const consolidationData = await request(
         `/models/${model}:generateContent`,
@@ -1210,7 +1196,7 @@ export async function runGeminiReasoningStepFanOut(params: {
               },
               contents: [{ role: 'user', parts: [{ text: continuationPrompt }] }],
               generationConfig: {
-                maxOutputTokens: Math.min(8000, consolidationOutputTokens)
+                maxOutputTokens: Math.min(32768, consolidationOutputTokens)
               }
             },
             { timeoutMs: Math.min(consolidationBudgetMs, remainingBudget) }

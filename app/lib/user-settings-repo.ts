@@ -130,7 +130,7 @@ export function normalizeUserSettingsUpdate(update: unknown): UserSettingsUpdate
   const researchMaxTotalSources = clampInt(obj.research_max_total_sources, 5, 300);
   if (researchMaxTotalSources !== null) normalized.research_max_total_sources = researchMaxTotalSources;
 
-  const researchMaxTokensPerStep = clampInt(obj.research_max_tokens_per_step, 300, 8000);
+  const researchMaxTokensPerStep = clampInt(obj.research_max_tokens_per_step, 300, 32768);
   if (researchMaxTokensPerStep !== null) normalized.research_max_tokens_per_step = researchMaxTokensPerStep;
 
   return normalized;

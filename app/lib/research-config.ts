@@ -34,14 +34,14 @@ const defaults: Record<ResearchProviderName, ProviderResearchConfig> = {
     full_model: getEnv('OPENAI_FULL_MODEL') || 'gpt-5',
     pro_model: getEnv('OPENAI_PRO_MODEL') || 'gpt-5-pro',
     steps: {
-      DEVELOP_RESEARCH_PLAN: { model_tier: 'mini', max_output_tokens: 1400 },
-      DISCOVER_SOURCES_WITH_PLAN: { model_tier: 'full', max_output_tokens: 2600 },
-      SHORTLIST_RESULTS: { model_tier: 'nano', max_output_tokens: 1200 },
-      DEEP_READ: { model_tier: 'full', max_output_tokens: 3000 },
-      EXTRACT_EVIDENCE: { model_tier: 'nano', max_output_tokens: 1500 },
-      COUNTERPOINTS: { model_tier: 'pro', max_output_tokens: 1800 },
-      GAP_CHECK: { model_tier: 'nano', max_output_tokens: 1200 },
-      SECTION_SYNTHESIS: { model_tier: 'pro', max_output_tokens: 3800 }
+      DEVELOP_RESEARCH_PLAN: { model_tier: 'mini', max_output_tokens: 4000 },
+      DISCOVER_SOURCES_WITH_PLAN: { model_tier: 'full', max_output_tokens: 12000 },
+      SHORTLIST_RESULTS: { model_tier: 'nano', max_output_tokens: 4000 },
+      DEEP_READ: { model_tier: 'full', max_output_tokens: 16000 },
+      EXTRACT_EVIDENCE: { model_tier: 'nano', max_output_tokens: 8000 },
+      COUNTERPOINTS: { model_tier: 'pro', max_output_tokens: 12000 },
+      GAP_CHECK: { model_tier: 'nano', max_output_tokens: 4000 },
+      SECTION_SYNTHESIS: { model_tier: 'pro', max_output_tokens: 32768 }
     },
     max_candidates: 40,
     shortlist_size: 18,
@@ -53,14 +53,14 @@ const defaults: Record<ResearchProviderName, ProviderResearchConfig> = {
     full_model: getEnv('GEMINI_DEEP_MODEL') || getEnv('GEMINI_MODEL') || 'gemini-2.5-pro',
     pro_model: getEnv('GEMINI_DEEP_MODEL') || getEnv('GEMINI_MODEL') || 'gemini-2.5-pro',
     steps: {
-      DEVELOP_RESEARCH_PLAN: { model_tier: 'mini', max_output_tokens: 1400 },
-      DISCOVER_SOURCES_WITH_PLAN: { model_tier: 'full', max_output_tokens: 2600 },
-      SHORTLIST_RESULTS: { model_tier: 'nano', max_output_tokens: 1200 },
-      DEEP_READ: { model_tier: 'full', max_output_tokens: 3000 },
-      EXTRACT_EVIDENCE: { model_tier: 'nano', max_output_tokens: 1500 },
-      COUNTERPOINTS: { model_tier: 'pro', max_output_tokens: 1800 },
-      GAP_CHECK: { model_tier: 'nano', max_output_tokens: 1200 },
-      SECTION_SYNTHESIS: { model_tier: 'pro', max_output_tokens: 3800 }
+      DEVELOP_RESEARCH_PLAN: { model_tier: 'mini', max_output_tokens: 4000 },
+      DISCOVER_SOURCES_WITH_PLAN: { model_tier: 'full', max_output_tokens: 12000 },
+      SHORTLIST_RESULTS: { model_tier: 'nano', max_output_tokens: 4000 },
+      DEEP_READ: { model_tier: 'full', max_output_tokens: 16000 },
+      EXTRACT_EVIDENCE: { model_tier: 'nano', max_output_tokens: 8000 },
+      COUNTERPOINTS: { model_tier: 'pro', max_output_tokens: 12000 },
+      GAP_CHECK: { model_tier: 'nano', max_output_tokens: 4000 },
+      SECTION_SYNTHESIS: { model_tier: 'pro', max_output_tokens: 32768 }
     },
     max_candidates: 40,
     shortlist_size: 18,
@@ -90,7 +90,7 @@ function mergeProviderConfig(
               : 'mini';
       mergedSteps[key] = {
         model_tier: normalizedTier,
-        max_output_tokens: asNumber(cfg.max_output_tokens, mergedSteps[key].max_output_tokens, 300, 8000)
+        max_output_tokens: asNumber(cfg.max_output_tokens, mergedSteps[key].max_output_tokens, 300, 32768)
       };
     }
   }

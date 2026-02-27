@@ -126,12 +126,11 @@ function getRetryableErrorCount(providerNative: unknown): number {
 
 function summarizePriorSteps(steps: Awaited<ReturnType<typeof listResearchSteps>>) {
   const sorted = [...steps].sort((a, b) => a.step_index - b.step_index);
-  const last = sorted.slice(-4);
-  return last
+  return sorted
     .map((s, idx) => {
-      const isLatest = idx === last.length - 1;
-      const isPrevious = idx === last.length - 2;
-      const charLimit = isLatest ? 4000 : isPrevious ? 2000 : 600;
+      const isLatest = idx === sorted.length - 1;
+      const isPrevious = idx === sorted.length - 2;
+      const charLimit = isLatest ? 24000 : isPrevious ? 16000 : 8000;
       const text = (s.raw_output || s.output_excerpt || '').slice(0, charLimit);
       return `Step ${s.step_index + 1} [${s.step_type}]:\n${text}`;
     })
@@ -219,7 +218,7 @@ async function executePlannedStep(params: {
   ]);
   const priorStepContext =
     stepsNeedingFullPrior.has(stepId) && prevStepFullOutput
-      ? `FULL OUTPUT FROM PREVIOUS STEP [${prevStep?.step_type ?? 'unknown'}]:\n${prevStepFullOutput.slice(0, 8000)}\n\n---\n\nSUMMARY OF EARLIER STEPS:\n${summary}`
+      ? `FULL OUTPUT FROM PREVIOUS STEP [${prevStep?.step_type ?? 'unknown'}]:\n${prevStepFullOutput.slice(0, 32768)}\n\n---\n\nSUMMARY OF EARLIER STEPS:\n${summary}`
       : summary;
   const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
   const artifact = await executePipelineStep({
@@ -230,7 +229,7 @@ async function executePlannedStep(params: {
     plan,
     priorStepSummary: priorStepContext,
     sourceTarget: clamp(run.target_sources_per_step, 1, run.provider === 'gemini' ? 100 : 30),
-    maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
+    maxOutputTokens: clamp(run.max_tokens_per_step, 300, 32768),
     maxCandidates: providerCfg.max_candidates,
     shortlistSize: providerCfg.shortlist_size
   });
@@ -338,7 +337,7 @@ export async function startRun(params: {
     maxSteps: STEP_SEQUENCE.length,
     targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
     maxTotalSources: clamp(settings.research_max_total_sources, 5, 400),
-    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
+    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 32768),
     minWordCount: defaultWordTarget(settings.research_depth)
   });
 
@@ -348,7 +347,7 @@ export async function startRun(params: {
     depth: settings.research_depth,
     maxSteps: STEP_SEQUENCE.length,
     targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
-    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
+    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 32768),
     timeoutMs: (params.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000
   });
   const canonicalStepsForInit = deriveCanonicalStepTypesFromPlan(generatedPlan.plan, STEP_SEQUENCE.length);
