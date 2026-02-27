@@ -44,13 +44,15 @@ vi.mock('../../app/lib/openai-client', () => ({
   startResearchJob: vi.fn(async () => ({ responseId: 'r1', status: 'in_progress', data: {} })),
   startRefinement: vi.fn(async () => ({ questions: [] })),
   rewritePrompt: vi.fn(async () => 'rewritten'),
-  summarizeForReport: vi.fn(async () => 'summary')
+  summarizeForReport: vi.fn(async () => 'summary'),
+  generateModelComparisonOpenAI: vi.fn(async () => 'comparison')
 }));
 vi.mock('../../app/lib/gemini-client', () => ({
   runGemini: vi.fn(async () => ({ outputText: 'gemini', sources: null })),
   rewritePromptGemini: vi.fn(async () => 'rewritten'),
   startRefinementGemini: vi.fn(async () => ({ questions: [] })),
-  summarizeForReportGemini: vi.fn(async () => 'summary')
+  summarizeForReportGemini: vi.fn(async () => 'summary'),
+  generateModelComparisonGemini: vi.fn(async () => 'comparison')
 }));
 
 import { runProviders } from '../../app/lib/orchestration';

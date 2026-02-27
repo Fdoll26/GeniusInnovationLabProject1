@@ -6,10 +6,15 @@ import { getEnv, getEnvInt, getEnvNumber } from './env';
 const openaiApiKey = getEnv('OPENAI_API_KEY');
 const openaiApiBase =
   getEnv('OPENAI_API_BASE') || 'https://api.openai.com/v1';
-const refinerModel = getEnv('OPENAI_REFINER_MODEL') || 'gpt-4.1-mini';
-const summaryModel = getEnv('OPENAI_SUMMARY_MODEL') || refinerModel;
-const deepResearchModel = getEnv('OPENAI_DEEP_RESEARCH_MODEL') || 'o3-deep-research';
-const deepResearchFallbackModel = getEnv('OPENAI_DEEP_RESEARCH_FALLBACK_MODEL') || null;
+const refinerModel = getEnv('OPENAI_REFINER_MODEL') || 'gpt-4.1-mini'; // kept for backward compat
+const nanoModel = getEnv('OPENAI_NANO_MODEL') || 'gpt-5-nano';
+const miniModel = getEnv('OPENAI_MINI_MODEL') || 'gpt-5-mini';
+const fullModel = getEnv('OPENAI_FULL_MODEL') || 'gpt-5';
+const proModel = getEnv('OPENAI_PRO_MODEL') || 'gpt-5-pro';
+const summaryModel = getEnv('OPENAI_SUMMARY_MODEL') || miniModel || nanoModel;
+const deepResearchModel = getEnv('OPENAI_DEEP_RESEARCH_MODEL') || proModel;
+const deepResearchFallbackModel = getEnv('OPENAI_DEEP_RESEARCH_FALLBACK_MODEL') || fullModel;
+export const legacyOpenAiRefinerModel = refinerModel;
 const maxToolCalls = getEnvNumber('OPENAI_MAX_TOOL_CALLS');
 const requestTimeoutMs = getEnvNumber('OPENAI_REQUEST_TIMEOUT_MS') ?? 10 * 60 * 1000;
 const headersTimeoutMs = getEnvNumber('OPENAI_HEADERS_TIMEOUT_MS') ?? 10 * 60 * 1000;
@@ -455,10 +460,22 @@ async function requestGet(path: string, opts?: { requestTimeoutMs?: number; head
   throw lastError instanceof Error ? lastError : new Error('OpenAI request failed');
 }
 
+function normalizeResponseData(data: unknown): unknown {
+  const typed = data as Record<string, unknown> | null;
+  if (typed && typeof typed === 'object' && !Array.isArray(typed)) {
+    const nested = typed.response;
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      return nested;
+    }
+  }
+  return data;
+}
+
 function extractOutputText(data: unknown): string {
-  const typed = data as {
+  const normalized = normalizeResponseData(data);
+  const typed = normalized as {
     output_text?: string;
-    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
     sources?: unknown;
   };
 
@@ -525,18 +542,24 @@ function extractOutputText(data: unknown): string {
       return out;
     };
 
-    const parts: string[] = [];
+    const messageParts: string[] = [];
+    const fallbackParts: string[] = [];
     for (const item of outputItems) {
+      const itemType = typeof (item as { type?: unknown })?.type === 'string' ? ((item as { type?: string }).type ?? null) : null;
       const content = Array.isArray((item as any)?.content) ? ((item as any).content as any[]) : [];
       for (const block of content) {
         const text = typeof block?.text === 'string' ? block.text : '';
         const withCites = addCitations(text, block?.annotations);
         if (withCites) {
-          parts.push(withCites);
+          if (itemType === 'message' || itemType === 'output_message') {
+            messageParts.push(withCites);
+          } else {
+            fallbackParts.push(withCites);
+          }
         }
       }
     }
-    const combined = parts.join('');
+    const combined = messageParts.join('') || fallbackParts.join('');
     if (combined) {
       return combined;
     }
@@ -550,14 +573,19 @@ function extractOutputText(data: unknown): string {
 }
 
 export function getResponseOutputText(data: unknown): string {
-  return extractOutputText(data);
+  return extractOutputText(normalizeResponseData(data));
 }
 
 export function getResponsePrimaryMessageContent(data: unknown): { text: string; annotations: unknown } | null {
-  const typed = data as {
-    output?: Array<{ content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
+  const normalized = normalizeResponseData(data);
+  const typed = normalized as {
+    output?: Array<{ type?: string; content?: Array<{ type?: string; text?: string; annotations?: unknown }> }>;
   };
-  const firstContent = typed?.output?.[0]?.content?.[0];
+  const messageItem = typed?.output?.find(
+    (item) => item?.type === 'message' || item?.type === 'output_message'
+  );
+  const targetItem = messageItem ?? typed?.output?.[0];
+  const firstContent = targetItem?.content?.[0];
   if (!firstContent || typeof firstContent.text !== 'string') {
     return null;
   }
@@ -568,8 +596,9 @@ export function getResponsePrimaryMessageContent(data: unknown): { text: string;
 }
 
 export function getResponseSources(data: unknown): unknown {
-  const topLevel = (data as { sources?: unknown }).sources ?? null;
-  const consulted = getResponseWebSearchCallSources(data);
+  const normalized = normalizeResponseData(data);
+  const topLevel = (normalized as { sources?: unknown }).sources ?? null;
+  const consulted = getResponseWebSearchCallSources(normalized);
   if (consulted.length === 0) return topLevel;
   return {
     response_sources: topLevel,
@@ -578,9 +607,10 @@ export function getResponseSources(data: unknown): unknown {
 }
 
 export function getResponseWebSearchCallSources(data: unknown): Array<{ url: string; title?: string | null }> {
+  const normalized = normalizeResponseData(data);
   const out: Array<{ url: string; title?: string | null }> = [];
   const seen = new Set<string>();
-  const output = (data as { output?: unknown[] })?.output;
+  const output = (normalized as { output?: unknown[] })?.output;
   if (!Array.isArray(output)) return out;
 
   for (const item of output) {
@@ -643,46 +673,22 @@ export async function startRefinement(topic: string, opts?: { stub?: boolean; ti
     };
   }
   const data = await request('/responses', {
-    model: refinerModel,
+    model: miniModel,
     input:
-      'You are a Research Question Refinement Assistant.\n' +
-      "Your task is to improve the clarity, specificity, and research-readiness of a user’s research question before it is sent to a deep research model.\n\n" +
-      'Your Responsibilities\n\n' +
-      '1. Assess the Input Question\n' +
-      ' - Determine whether the question is:\n' +
-      ' - Clear and specific\n' +
-      ' - Too broad\n' +
-      '  - Ambiguous\n' +
-      ' - Missing important constraints (timeframe, geography, population, context, definitions, etc.)\n\n' +
-      '2. If Clarification Is Needed\n' +
-      ' - Ask concise, targeted clarifying questions.\n' +
-      ' - Only ask questions that materially improve research quality.\n' +
-      ' - Limit to 1–5 high-impact clarifying questions.\n' +
-      ' - Do NOT explain why you are asking.\n' +
-      ' - Do NOT attempt to answer the research question yet.\n\n' +
-      '3. If No Clarification Is Needed\n' +
-      ' - Output NONE.\n\n' +
-      'Output Rules\n' +
-      'You must output in ONE of the following two formats:\n\n' +
-      'Format A: Clarification Needed\n' +
+      'You are a Research Question Refiner for deep-research workflows.\n' +
+      'Goal: make the question precise enough that step-by-step research produces a complete, high-quality final report.\n\n' +
+      'Decision:\n' +
+      '- If the question is already research-ready, output EXACTLY: NONE\n' +
+      '- Otherwise output:\n' +
       'CLARIFICATION REQUIRED:\n' +
-      '1. [Question]\n' +
-      '2. [Question]\n' +
-      '3. [Question]\n\n' +
-      'Format B: No Clarification Needed\n' +
-      'NONE\n\n' +
-      'Do not output anything else.\n' +
-      'Do not include explanations.\n' +
-      'Do not include commentary.\n' +
-      'Do not answer the research question.\n\n' +
-      'Evaluation Criteria\n' +
-      ' - A research-ready question should:\n' +
-      ' - Be specific and bounded\n' +
-      ' - Identify relevant population, variables, or domain\n' +
-      ' - Avoid vague terms (e.g., “better,” “impact,” “effective” without context)\n' +
-      ' - Avoid unnecessary breadth\n' +
-      ' - Be suitable for deep, structured research\n\n' +
-      'If the user input is not a research question, reformulate it into one when possible.\n\n' +
+      '1. ...\n' +
+      '2. ...\n\n' +
+      'Rules:\n' +
+      '- Ask 1-5 questions max.\n' +
+      '- Ask only high-impact questions that change research results.\n' +
+      '- Prioritize: timeframe, geography, scope (entities/population), comparison baseline, success criteria, and desired output format.\n' +
+      '- No explanations, no answers, no meta-commentary.\n' +
+      '- Do not write anything except NONE or CLARIFICATION REQUIRED with numbered questions.\n\n' +
       `USER INPUT:\n${topic}`
   }, opts?.timeoutMs ? { requestTimeoutMs: opts.timeoutMs, headersTimeoutMs: opts.timeoutMs, bodyTimeoutMs: opts.timeoutMs } : undefined);
   const parsed = parseRefinementOutput(extractOutputText(data));
@@ -698,6 +704,7 @@ export async function runResearch(
     timeoutMs?: number;
     maxSources?: number;
     reasoningLevel?: ReasoningLevel;
+    model?: string;
     onStarted?: (info: { responseId: string; status: string | null }) => void | Promise<void>;
   }
 ): Promise<ResearchResponse> {
@@ -706,11 +713,11 @@ export async function runResearch(
   }
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
+      ? Math.max(10, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
-      ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
+      ? `SOURCE COVERAGE TARGET: Use at least ${maxSources} distinct high-quality sources when available. Exceed this target if needed for completeness, contradiction checks, and full coverage. Prefer primary sources and highly reputable secondary sources.`
       : null;
   const depthText =
     'DEPTH & TOOLS: Be as in-depth and thorough as possible, and use all tools available to you that improve accuracy and completeness.';
@@ -737,18 +744,19 @@ export async function runResearch(
     : `${depthText}\n\n${refinedPrompt}`;
 
   const mappedEffort = (() => {
-    if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
+    const modelToCheck = opts?.model || deepResearchModel;
+    if (!opts?.reasoningLevel || !/^o\d/i.test(modelToCheck)) {
       return null;
     }
     // Some Deep Research models only accept specific effort values.
-    if (deepResearchModel.includes('o4-mini-deep-research')) {
+    if (modelToCheck.includes('o4-mini-deep-research')) {
       return 'medium' as const;
     }
     return opts.reasoningLevel as ReasoningEffort;
   })();
   const reasoning = mappedEffort ? { effort: mappedEffort } : undefined;
 
-  const body = buildDeepResearchBody(legacyInput, reasoning);
+  const body = buildDeepResearchBody(legacyInput, reasoning, opts?.model);
   try {
     const timeoutBudgetMs = typeof opts?.timeoutMs === 'number' && opts.timeoutMs > 0 ? opts.timeoutMs : requestTimeoutMs;
     let started: { responseId: string | null; status: string | null; data: unknown };
@@ -756,7 +764,8 @@ export async function runResearch(
       try {
         return await startDeepResearch(messageInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
@@ -765,7 +774,8 @@ export async function runResearch(
         }
         return await startDeepResearch(legacyInput, {
           timeoutMs: timeoutBudgetMs,
-          reasoning: override
+          reasoning: override,
+          model: opts?.model
         });
       }
     };
@@ -837,11 +847,11 @@ export async function startResearchJob(
 
   const maxSources =
     typeof opts?.maxSources === 'number'
-      ? Math.max(1, Math.min(50, Math.trunc(opts.maxSources)))
+      ? Math.max(10, Math.min(50, Math.trunc(opts.maxSources)))
       : null;
   const sourceBudgetText =
     maxSources != null
-      ? `SOURCE BUDGET: Use at most ${maxSources} distinct sources. Prefer primary sources and highly reputable secondary sources.`
+      ? `SOURCE COVERAGE TARGET: Use at least ${maxSources} distinct high-quality sources when available. Exceed this target if needed for completeness, contradiction checks, and full coverage. Prefer primary sources and highly reputable secondary sources.`
       : null;
   const messageInput = [
     ...(sourceBudgetText
@@ -860,10 +870,11 @@ export async function startResearchJob(
   const legacyInput = sourceBudgetText ? `${sourceBudgetText}\n\n${refinedPrompt}` : refinedPrompt;
 
   const mappedEffort = (() => {
-    if (!opts?.reasoningLevel || !/^o\d/i.test(deepResearchModel)) {
+    const modelToCheck = opts?.model || deepResearchModel;
+    if (!opts?.reasoningLevel || !/^o\d/i.test(modelToCheck)) {
       return null;
     }
-    if (deepResearchModel.includes('o4-mini-deep-research')) {
+    if (modelToCheck.includes('o4-mini-deep-research')) {
       return 'medium' as const;
     }
     return opts.reasoningLevel as ReasoningEffort;
@@ -1021,10 +1032,13 @@ export async function rewritePrompt(
   const data = await request(
     '/responses',
     {
-      model: refinerModel,
+      model: miniModel,
       input:
-        'Rewrite the user prompt into a clear, detailed research prompt. ' +
-        'Include constraints from clarifications. Return only the rewritten prompt.\n\n' +
+        'Rewrite the user prompt into ONE high-impact deep-research prompt that maximizes completeness and insight.\n' +
+        'Include constraints from clarifications.\n' +
+        'Do NOT impose artificial brevity, source-count caps, or output-length limits.\n' +
+        'Require full evidence coverage, opposing viewpoints, and explicit uncertainties.\n' +
+        'Return only the rewritten prompt.\n\n' +
         `Original topic: ${input.topic}\n` +
         `Draft prompt: ${input.draftPrompt}\n` +
         `Clarifications:\n${clarificationsText}`
@@ -1080,6 +1094,43 @@ export async function summarizeForReport(
   return extractOutputText(data).trim();
 }
 
+export async function generateModelComparisonOpenAI(
+  input: {
+    openaiReport: string;
+    geminiReport: string;
+    topic: string;
+  },
+  opts?: { stub?: boolean; timeoutMs?: number }
+): Promise<string> {
+  if (opts?.stub) {
+    return `Stub comparison for topic: ${input.topic}.`;
+  }
+
+  const openaiExcerpt = input.openaiReport.trim().slice(0, 5000);
+  const geminiExcerpt = input.geminiReport.trim().slice(0, 5000);
+
+  const data = await request(
+    '/responses',
+    {
+      model: fullModel,
+      input:
+        `You are a senior research analyst comparing two independent AI-generated research reports on the same topic.\n\n` +
+        `RESEARCH TOPIC: ${input.topic}\n\n` +
+        `OPENAI REPORT EXCERPT:\n${openaiExcerpt}\n\n` +
+        `GEMINI REPORT EXCERPT:\n${geminiExcerpt}\n\n` +
+        `Write a concise but thorough comparison with these subsections:\n` +
+        `1. **Key Agreements** - Major findings both reports agree on.\n` +
+        `2. **Notable Differences** - Where the reports diverge.\n` +
+        `3. **Unique OpenAI Insights** - Only in the OpenAI report.\n` +
+        `4. **Unique Gemini Insights** - Only in the Gemini report.\n` +
+        `5. **Coverage Assessment** - Brief overall assessment of depth and reliability.\n\n` +
+        `Use neutral language. Be specific about differences.`
+    },
+    opts?.timeoutMs ? { requestTimeoutMs: opts.timeoutMs, headersTimeoutMs: opts.timeoutMs, bodyTimeoutMs: opts.timeoutMs } : undefined
+  );
+  return extractOutputText(data).trim();
+}
+
 export async function runOpenAiReasoningStep(params: {
   prompt: string;
   maxOutputTokens: number;
@@ -1099,9 +1150,9 @@ export async function runOpenAiReasoningStep(params: {
   sources?: unknown;
 }> {
   const body: Record<string, unknown> = {
-    model: params.model || refinerModel,
+    model: params.model || miniModel,
     input: params.prompt,
-    max_output_tokens: Math.max(200, Math.min(8000, Math.trunc(params.maxOutputTokens))),
+    max_output_tokens: Math.max(200, Math.min(32768, Math.trunc(params.maxOutputTokens))),
     ...(params.previousResponseId ? { previous_response_id: params.previousResponseId } : {})
   };
   if (params.structuredOutput) {

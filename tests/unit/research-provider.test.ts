@@ -17,6 +17,23 @@ const runGeminiReasoningStep = vi.fn(async () => ({
   sources: null,
   usage: null
 }));
+const runGeminiReasoningStepFanOut = vi.fn(async () => ({
+  text: geminiPlanFixture,
+  sources: null,
+  usage: null,
+  subcallResults: [],
+  coverageMetrics: {
+    subcallsPlanned: 0,
+    subcallsCompleted: 0,
+    subcallsFailed: 0,
+    uniqueSources: 0,
+    uniqueDomains: 0,
+    webSearchQueryCount: 0,
+    groundedSegments: 0,
+    avgConfidence: null
+  },
+  rankedSources: []
+}));
 
 vi.mock('../../app/lib/openai-client', () => ({
   runOpenAiReasoningStep: (...args: any[]) => runOpenAiReasoningStep(...args),
@@ -31,17 +48,21 @@ vi.mock('../../app/lib/openai-client', () => ({
   pollDeepResearch: vi.fn(async () => ({ status: 'completed', data: { output_text: 'native text https://example.com' } })),
   getResponsePrimaryMessageContent: vi.fn(() => null),
   getResponseOutputText: vi.fn(() => 'native text https://example.com'),
-  getResponseSources: vi.fn(() => null)
+  getResponseSources: vi.fn(() => null),
+  generateModelComparisonOpenAI: vi.fn(async () => 'comparison')
 }));
 
 vi.mock('../../app/lib/gemini-client', () => ({
   runGeminiReasoningStep: (...args: any[]) => runGeminiReasoningStep(...args),
+  runGeminiReasoningStepFanOut: (...args: any[]) => runGeminiReasoningStepFanOut(...args),
   runGemini: vi.fn(async () => ({
     outputText:
       'This collected finding line is intentionally long and detailed to exceed the evidence extraction threshold while citing https://example.org',
     sources: null
   })),
-  extractGeminiGroundingMetadata: vi.fn(() => null)
+  looksTruncated: vi.fn(() => false),
+  extractGeminiGroundingMetadata: vi.fn(() => null),
+  generateModelComparisonGemini: vi.fn(async () => 'comparison')
 }));
 
 import { executeCustomStep, generateResearchPlan } from '../../app/lib/research-provider';
@@ -82,8 +103,9 @@ describe('research-provider', () => {
       timeoutMs: 30_000
     });
 
-    expect(out.plan.steps.length).toBe(3);
+    expect(out.plan.steps.length).toBe(8);
     expect(out.plan.steps[0]?.step_type).toBe('DEVELOP_RESEARCH_PLAN');
+    expect(out.plan.steps[7]?.step_type).toBe('SECTION_SYNTHESIS');
     expect(runGeminiReasoningStep).toHaveBeenCalledWith(
       expect.objectContaining({
         structuredOutput: expect.objectContaining({

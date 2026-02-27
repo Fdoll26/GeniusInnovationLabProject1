@@ -1,4 +1,4 @@
-import { PDFDocument, PDFName, PDFString, StandardFonts, rgb } from 'pdf-lib';
+import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 
 export type ReportInput = {
   sessionId: string;
@@ -7,6 +7,7 @@ export type ReportInput = {
   summaryMode?: 'one' | 'two';
   openaiSummary?: string | null;
   geminiSummary?: string | null;
+  comparisonSection?: string | null;
   openaiStartedAt?: string | null;
   openaiCompletedAt?: string | null;
   geminiStartedAt?: string | null;
@@ -22,7 +23,7 @@ export type ReportInput = {
   createdAt: string;
 };
 
-type SourceItem = { title?: string; url: string };
+type ReportReference = { n: number; title?: string; url: string; accessedAt?: string };
 
 function sanitizePdfText(value: string) {
   return value
@@ -56,93 +57,103 @@ function formatDuration(ms: number): string {
   return `${minutes}m ${seconds}s`;
 }
 
-function toSentenceBullets(text: string, maxBullets: number) {
-  const cleaned = text
-    .replace(/\s+/g, ' ')
-    .replace(/\u0000/g, '')
+function demoteHeadings(markdown: string): string {
+  return markdown.replace(/^(#{1,5})\s/gm, (_, hashes: string) => `${hashes}# `);
+}
+
+function buildSourcesSection(refs: ReportReference[]): string {
+  if (!refs.length) return '';
+  const lines = refs.map((ref) => `[${ref.n}] ${ref.title ? `${ref.title} - ` : ''}${ref.url}`);
+  return `\n\n## Sources\n\n${lines.join('\n')}`;
+}
+
+function replaceUrlsWithReferenceNumbers(text: string, refs: ReportReference[]): string {
+  if (!text.trim() || refs.length === 0) return text;
+  const refByUrl = new Map(refs.map((ref) => [ref.url, ref.n]));
+  const markdownLinked = text.replace(/\[[^\]]+\]\((https?:\/\/[^\s<>"')]+)\)/g, (whole, url: string) => {
+    const clean = url.replace(/[),.;:!?]+$/, '');
+    const n = refByUrl.get(clean);
+    return n ? `[${n}]` : whole;
+  });
+  const bracketed = markdownLinked.replace(/\[(https?:\/\/[^\s<>"'\]]+)\]/g, (whole, url: string) => {
+    const clean = url.replace(/[),.;:!?]+$/, '');
+    const n = refByUrl.get(clean);
+    return n ? `[${n}]` : whole;
+  });
+  const regex = /https?:\/\/[^\s<>"']+/g;
+  return bracketed.replace(regex, (raw) => {
+    const clean = raw.replace(/[),.;:!?]+$/, '');
+    const suffix = raw.slice(clean.length);
+    const n = refByUrl.get(clean);
+    return n ? `[${n}]${suffix}` : raw;
+  });
+}
+
+function stripEmbeddedSourcesSection(markdown: string): string {
+  if (!markdown.trim()) return markdown;
+  return markdown
+    .replace(/\n#{1,6}\s+sources\b[\s\S]*$/im, '')
+    .replace(/\n##\s+references\b[\s\S]*$/im, '')
     .trim();
-  if (!cleaned) {
-    return [];
-  }
-  const parts = cleaned
-    .split(/(?<=[.!?])\s+/)
-    .map((p) => p.trim())
-    .filter(Boolean);
-  const bullets: string[] = [];
-  for (const part of parts) {
-    if (bullets.length >= maxBullets) {
-      break;
+}
+
+function isGroundingLink(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const path = parsed.pathname.toLowerCase();
+    if (host === 'google.com' || host.endsWith('.google.com')) {
+      if (path.startsWith('/search') || path.startsWith('/url') || path.startsWith('/imgres')) {
+        return true;
+      }
     }
-    if (part.length < 25) {
+    if (
+      host.includes('googleusercontent.com') ||
+      host.includes('generativelanguage.googleapis.com') ||
+      host.includes('vertexaisearch.cloud.google.com') ||
+      host.includes('ai.google.dev')
+    ) {
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeRefs(refs: ReportReference[]): ReportReference[] {
+  const out: ReportReference[] = [];
+  const seen = new Set<string>();
+  for (const ref of refs) {
+    if (!ref?.url || isGroundingLink(ref.url)) {
       continue;
     }
-    bullets.push(part);
+    if (seen.has(ref.url)) {
+      continue;
+    }
+    seen.add(ref.url);
+    out.push(ref);
   }
-  return bullets.length > 0 ? bullets : parts.slice(0, maxBullets);
+  return out;
 }
 
-function isUrl(value: unknown): value is string {
-  return typeof value === 'string' && /^https?:\/\//i.test(value);
-}
-
-function extractSources(sources: unknown, maxItems = 2): SourceItem[] {
-  const out: SourceItem[] = [];
+function deriveRefsFromText(text: string): ReportReference[] {
+  if (!text.trim()) return [];
+  const regex = /https?:\/\/[^\s<>"')\]]+/g;
   const seen = new Set<string>();
-
-  const push = (url: string, title?: string) => {
-    if (!url || seen.has(url)) {
-      return;
+  const out: ReportReference[] = [];
+  let match: RegExpExecArray | null = null;
+  while ((match = regex.exec(text)) !== null) {
+    const raw = match[0];
+    if (!raw) continue;
+    const clean = raw.replace(/[),.;:!?]+$/, '');
+    if (!clean || seen.has(clean) || isGroundingLink(clean)) {
+      continue;
     }
-    seen.add(url);
-    out.push({ url, title });
-  };
-
-  const visit = (node: unknown, depth: number) => {
-    if (out.length >= maxItems || depth <= 0 || node == null) {
-      return;
-    }
-    if (isUrl(node)) {
-      push(node);
-      return;
-    }
-    if (Array.isArray(node)) {
-      for (const item of node) {
-        if (out.length >= maxItems) {
-          return;
-        }
-        visit(item, depth - 1);
-      }
-      return;
-    }
-    if (typeof node === 'object') {
-      const record = node as Record<string, unknown>;
-      const directUrl =
-        (typeof record.url === 'string' && record.url) ||
-        (typeof record.link === 'string' && record.link) ||
-        (typeof record.href === 'string' && record.href) ||
-        null;
-      const title =
-        (typeof record.title === 'string' && record.title) ||
-        (typeof record.name === 'string' && record.name) ||
-        (typeof record.source === 'string' && record.source) ||
-        undefined;
-      if (directUrl && /^https?:\/\//i.test(directUrl)) {
-        push(directUrl, title);
-        if (out.length >= maxItems) {
-          return;
-        }
-      }
-      for (const value of Object.values(record)) {
-        if (out.length >= maxItems) {
-          return;
-        }
-        visit(value, depth - 1);
-      }
-    }
-  };
-
-  visit(sources, 5);
-  return out.slice(0, maxItems);
+    seen.add(clean);
+    out.push({ n: out.length + 1, url: clean });
+  }
+  return out;
 }
 
 export async function buildPdfReport(
@@ -166,8 +177,6 @@ export async function buildPdfReport(
   const brand = rgb(79 / 255, 70 / 255, 229 / 255);
   const ink = rgb(17 / 255, 24 / 255, 39 / 255);
   const muted = rgb(107 / 255, 114 / 255, 128 / 255);
-  const openaiAccent = rgb(16 / 255, 185 / 255, 129 / 255);
-  const geminiAccent = rgb(59 / 255, 130 / 255, 246 / 255);
 
   const bannerHeight = 54;
   const headerHeight = 28;
@@ -217,25 +226,6 @@ export async function buildPdfReport(
       drawPageHeader();
       y = page.getSize().height - headerHeight - 20;
     }
-  };
-
-  const addLinkAnnotation = (url: string, x: number, yPos: number, width: number, height: number) => {
-    if (!url || width <= 0 || height <= 0) {
-      return;
-    }
-    const link = pdfDoc.context.obj({
-      Type: PDFName.of('Annot'),
-      Subtype: PDFName.of('Link'),
-      Rect: [x, yPos, x + width, yPos + height],
-      Border: [0, 0, 0],
-      A: {
-        Type: PDFName.of('Action'),
-        S: PDFName.of('URI'),
-        URI: PDFString.of(url)
-      }
-    });
-    const linkRef = pdfDoc.context.register(link);
-    page.node.addAnnot(linkRef);
   };
 
   const writeLine = (
@@ -331,110 +321,6 @@ export async function buildPdfReport(
     }
   };
 
-  const writeLinkedParagraph = (
-    segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }>,
-    options?: { bold?: boolean; size?: number; color?: ReturnType<typeof rgb> }
-  ) => {
-    const fontSize = options?.size ?? bodyFontSize;
-    const activeFont = options?.bold ? fontBold : font;
-    const lineAdvance = Math.max(lineHeight, Math.round(fontSize * 1.35));
-
-    const tokens: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [];
-    for (const segment of segments) {
-      if (!segment.text) {
-        continue;
-      }
-      const safeText = sanitizePdfText(segment.text);
-      const parts = safeText.match(/\S+|\s+/g) ?? [];
-      for (const part of parts) {
-        tokens.push({ text: part, url: segment.url, color: segment.color });
-      }
-    }
-
-    const splitLongToken = (token: string) => {
-      const parts: string[] = [];
-      let remaining = token;
-      while (remaining.length > 0) {
-        let lo = 1;
-        let hi = remaining.length;
-        let best = 1;
-        while (lo <= hi) {
-          const mid = Math.floor((lo + hi) / 2);
-          const chunk = remaining.slice(0, mid);
-          const w = activeFont.widthOfTextAtSize(chunk, fontSize);
-          if (w <= maxWidth) {
-            best = mid;
-            lo = mid + 1;
-          } else {
-            hi = mid - 1;
-          }
-        }
-        parts.push(remaining.slice(0, best));
-        remaining = remaining.slice(best);
-      }
-      return parts;
-    };
-
-    let lineTokens: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [];
-    let lineWidth = 0;
-
-    const flushLine = () => {
-      if (lineTokens.length === 0) {
-        return;
-      }
-      ensureSpace(lineAdvance);
-      let x = margin;
-      for (const token of lineTokens) {
-        if (!token.text) continue;
-        const tokenWidth = activeFont.widthOfTextAtSize(token.text, fontSize);
-        const color = token.color ?? options?.color ?? ink;
-        page.drawText(token.text, { x, y, size: fontSize, font: activeFont, color });
-        if (token.url && tokenWidth > 0) {
-          addLinkAnnotation(token.url, x, y - 2, tokenWidth, fontSize + 4);
-        }
-        x += tokenWidth;
-      }
-      y -= lineAdvance;
-      lineTokens = [];
-      lineWidth = 0;
-    };
-
-    for (const token of tokens) {
-      if (!token.text) continue;
-      const isWhitespace = /^\s+$/.test(token.text);
-      const tokenWidth = activeFont.widthOfTextAtSize(token.text, fontSize);
-
-      if (tokenWidth > maxWidth) {
-        if (lineTokens.length > 0) {
-          flushLine();
-        }
-        const chunks = splitLongToken(token.text);
-        for (const chunk of chunks) {
-          lineTokens = [{ text: chunk, url: token.url, color: token.color }];
-          lineWidth = activeFont.widthOfTextAtSize(chunk, fontSize);
-          flushLine();
-        }
-        continue;
-      }
-
-      if (isWhitespace && lineTokens.length === 0) {
-        continue;
-      }
-
-      if (lineWidth + tokenWidth > maxWidth && lineTokens.length > 0) {
-        flushLine();
-        if (isWhitespace) {
-          continue;
-        }
-      }
-
-      lineTokens.push(token);
-      lineWidth += tokenWidth;
-    }
-
-    flushLine();
-  };
-
   const writeSectionHeading = (title: string, accent: ReturnType<typeof rgb>) => {
     ensureSpace(28);
     const { width } = page.getSize();
@@ -463,34 +349,543 @@ export async function buildPdfReport(
     y -= 28;
   };
 
-  const writeProviderSummary = (provider: string, accent: ReturnType<typeof rgb>, summaryText: string) => {
-    writeLine(provider, { bold: true, size: 12, color: accent });
-    writeParagraph(summaryText || 'No result available.', { size: bodyFontSize });
+  const timingMarkdown = (startedAt: string | null | undefined, completedAt: string | null | undefined): string => {
+    const startedMs = tryParseDateMs(startedAt ?? null);
+    const completedMs = tryParseDateMs(completedAt ?? null);
+    const startedLine = `Started: ${startedMs ? new Date(startedMs).toLocaleString() : 'N/A'}`;
+    const finishedLine = `Finished: ${completedMs ? new Date(completedMs).toLocaleString() : 'N/A'}`;
+    const durationLine =
+      startedMs != null && completedMs != null && completedMs >= startedMs
+        ? `Duration: ${formatDuration(completedMs - startedMs)}`
+        : 'Duration: N/A';
+    return `${startedLine}\n${finishedLine}\n${durationLine}`;
+  };
+
+  const stripInlineMarkdown = (text: string): string => {
+    return text
+      .replace(/\*\*\*(.+?)\*\*\*/g, '$1')
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/__(.+?)__/g, '$1')
+      .replace(/_(.+?)_/g, '$1')
+      .replace(/~~(.+?)~~/g, '$1')
+      .replace(/`([^`]+)`/g, '[$1]')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .trim();
+  };
+
+  const isTableLine = (line: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    return (trimmed.startsWith('|') && trimmed.includes('|')) || (trimmed.match(/\|/g)?.length ?? 0) >= 2;
+  };
+
+  const isTableSeparator = (line: string): boolean => {
+    return /^\s*\|[\s\-:|]+\|\s*$/.test(line) && !/[a-zA-Z0-9]/.test(line);
+  };
+
+  const parsePipeTable = (lines: string[]): { headers: string[]; rows: string[][] } | null => {
+    const dataLines = lines.filter((line) => !isTableSeparator(line));
+    if (dataLines.length < 1) return null;
+
+    const parseRow = (line: string): string[] =>
+      line
+        .trim()
+        .replace(/^\||\|$/g, '')
+        .split('|')
+        .map((cell) => cell.trim());
+
+    const headers = parseRow(dataLines[0] ?? '');
+    if (headers.length === 0) return null;
+    const rows = dataLines.slice(1).map(parseRow);
+    return { headers, rows };
+  };
+
+  const parseDelimitedRow = (line: string, delimiter: string): string[] => {
+    const cells: string[] = [];
+    let current = '';
+    let inQuotes = false;
+    for (let idx = 0; idx < line.length; idx += 1) {
+      const ch = line[idx] ?? '';
+      if (ch === '"') {
+        if (inQuotes && line[idx + 1] === '"') {
+          current += '"';
+          idx += 1;
+          continue;
+        }
+        inQuotes = !inQuotes;
+        continue;
+      }
+      if (!inQuotes && ch === delimiter) {
+        cells.push(current.trim());
+        current = '';
+        continue;
+      }
+      current += ch;
+    }
+    cells.push(current.trim());
+    return cells.map((cell) => cell.replace(/^"(.*)"$/, '$1').trim());
+  };
+
+  const isLikelyDelimitedLine = (line: string, delimiter: string): boolean => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    if (trimmed.startsWith('#') || trimmed.startsWith('|') || trimmed.startsWith('>')) return false;
+    if (/^[\s]*[-*+]\s+/.test(trimmed)) return false;
+    if (/^[\s]*\d+\.\s+/.test(trimmed)) return false;
+    if (!trimmed.includes(delimiter)) return false;
+    const parsed = parseDelimitedRow(trimmed, delimiter);
+    return parsed.length >= 2;
+  };
+
+  const parseDelimitedTable = (lines: string[], delimiter: string): { headers: string[]; rows: string[][] } | null => {
+    if (lines.length < 2) return null;
+    const parsedRows = lines.map((line) => parseDelimitedRow(line, delimiter));
+    const header = parsedRows[0] ?? [];
+    if (header.length < 2) return null;
+    const colCount = header.length;
+    const normalizeRow = (row: string[]) =>
+      Array.from({ length: colCount }, (_, idx) => {
+        const val = row[idx]?.trim();
+        return val && val.length > 0 ? val : 'N/A';
+      });
+    const headers = normalizeRow(header);
+    const rows = parsedRows.slice(1).map(normalizeRow);
+    return { headers, rows };
+  };
+
+  const writeWrappedTextAt = (text: string, startX: number, textMaxWidth: number) => {
+    const words = text.split(/\s+/);
+    let line = '';
+    for (const word of words) {
+      const testLine = line ? `${line} ${word}` : word;
+      const lineWidth = font.widthOfTextAtSize(testLine, bodyFontSize);
+      if (lineWidth > textMaxWidth && line) {
+        ensureSpace(lineHeight);
+        page.drawText(sanitizePdfText(line), {
+          x: startX,
+          y,
+          size: bodyFontSize,
+          font,
+          color: ink
+        });
+        y -= lineHeight;
+        line = word;
+      } else {
+        line = testLine;
+      }
+    }
+    if (line) {
+      ensureSpace(lineHeight);
+      page.drawText(sanitizePdfText(line), {
+        x: startX,
+        y,
+        size: bodyFontSize,
+        font,
+        color: ink
+      });
+      y -= lineHeight;
+    }
+  };
+
+  const wrapCellText = (text: string, maxW: number, fontSize: number, activeFont = font): string[] => {
+    const safe = sanitizePdfText(stripInlineMarkdown(text ?? '')).trim();
+    if (!safe) return [''];
+    const words = safe.split(/\s+/);
+    const linesOut: string[] = [];
+    let line = '';
+
+    const splitLongToken = (token: string): string[] => {
+      const parts: string[] = [];
+      let remaining = token;
+      while (remaining.length > 0) {
+        let lo = 1;
+        let hi = remaining.length;
+        let best = 1;
+        while (lo <= hi) {
+          const mid = Math.floor((lo + hi) / 2);
+          const chunk = remaining.slice(0, mid);
+          const w = activeFont.widthOfTextAtSize(chunk, fontSize);
+          if (w <= maxW) {
+            best = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        parts.push(remaining.slice(0, best));
+        remaining = remaining.slice(best);
+      }
+      return parts;
+    };
+
+    for (const word of words) {
+      const wordWidth = activeFont.widthOfTextAtSize(word, fontSize);
+      if (wordWidth > maxW) {
+        if (line) {
+          linesOut.push(line);
+          line = '';
+        }
+        const chunks = splitLongToken(word);
+        for (let i = 0; i < chunks.length; i += 1) {
+          if (i === chunks.length - 1) {
+            line = chunks[i] ?? '';
+          } else {
+            linesOut.push(chunks[i] ?? '');
+          }
+        }
+        continue;
+      }
+
+      const testLine = line ? `${line} ${word}` : word;
+      const lineWidth = activeFont.widthOfTextAtSize(testLine, fontSize);
+      if (lineWidth > maxW && line) {
+        linesOut.push(line);
+        line = word;
+      } else {
+        line = testLine;
+      }
+    }
+    if (line) {
+      linesOut.push(line);
+    }
+    return linesOut.length > 0 ? linesOut : [''];
+  };
+
+  const writeTable = (headers: string[], rows: string[][]) => {
+    if (headers.length === 0) return;
+
+    const colCount = headers.length;
+    const colWidth = Math.max(80, Math.floor(maxWidth / colCount));
+    const tableWidth = Math.min(maxWidth, colWidth * colCount);
+    const cellPadding = 4;
+    const tableLineHeight = 11;
+    const tableFontSize = 9;
+    const headerBg = rgb(79 / 255, 70 / 255, 229 / 255);
+    const rowBg1 = rgb(249 / 255, 250 / 255, 251 / 255);
+    const rowBg2 = rgb(1, 1, 1);
+    const borderColor = rgb(209 / 255, 213 / 255, 219 / 255);
+
+    const headerCells = headers.map((h) => wrapCellText(h ?? '', colWidth - cellPadding * 2, tableFontSize, fontBold));
+    const headerRowHeight = cellPadding * 2 + Math.max(1, ...headerCells.map((lines) => lines.length)) * tableLineHeight;
+
+    ensureSpace(headerRowHeight + tableLineHeight + cellPadding * 2 + 4);
+
+    for (let col = 0; col < colCount; col += 1) {
+      const x = margin + col * colWidth;
+      page.drawRectangle({
+        x,
+        y: y - headerRowHeight + 4,
+        width: colWidth,
+        height: headerRowHeight,
+        color: headerBg
+      });
+      const headerLines = headerCells[col] ?? [''];
+      const headerStartY = y + 4 - cellPadding - tableFontSize;
+      for (let lineIdx = 0; lineIdx < headerLines.length; lineIdx += 1) {
+        page.drawText(headerLines[lineIdx] ?? '', {
+          x: x + cellPadding,
+          y: headerStartY - lineIdx * tableLineHeight,
+          size: tableFontSize,
+          font: fontBold,
+          color: rgb(1, 1, 1)
+        });
+      }
+      if (col < colCount - 1) {
+        page.drawRectangle({
+          x: x + colWidth - 1,
+          y: y - headerRowHeight + 4,
+          width: 1,
+          height: headerRowHeight,
+          color: borderColor
+        });
+      }
+    }
+    page.drawRectangle({
+      x: margin,
+      y: y - headerRowHeight + 3,
+      width: tableWidth,
+      height: 1,
+      color: borderColor
+    });
+    y -= headerRowHeight;
+
+    for (let rowIdx = 0; rowIdx < rows.length; rowIdx += 1) {
+      const row = rows[rowIdx] ?? [];
+      const rowCells = Array.from({ length: colCount }, (_, colIdx) =>
+        wrapCellText(row[colIdx] ?? '', colWidth - cellPadding * 2, tableFontSize, font)
+      );
+      const rowHeight = cellPadding * 2 + Math.max(1, ...rowCells.map((lines) => lines.length)) * tableLineHeight;
+      ensureSpace(rowHeight + 2);
+      const bg = rowIdx % 2 === 0 ? rowBg1 : rowBg2;
+
+      for (let col = 0; col < colCount; col += 1) {
+        const x = margin + col * colWidth;
+        page.drawRectangle({
+          x,
+          y: y - rowHeight + 4,
+          width: colWidth,
+          height: rowHeight,
+          color: bg
+        });
+        const cellLines = rowCells[col] ?? [''];
+        const cellStartY = y + 4 - cellPadding - tableFontSize;
+        for (let lineIdx = 0; lineIdx < cellLines.length; lineIdx += 1) {
+          page.drawText(cellLines[lineIdx] ?? '', {
+            x: x + cellPadding,
+            y: cellStartY - lineIdx * tableLineHeight,
+            size: tableFontSize,
+            font,
+            color: ink
+          });
+        }
+        if (col < colCount - 1) {
+          page.drawRectangle({
+            x: x + colWidth - 1,
+            y: y - rowHeight + 4,
+            width: 1,
+            height: rowHeight,
+            color: borderColor
+          });
+        }
+      }
+      page.drawRectangle({
+        x: margin,
+        y: y - rowHeight + 3,
+        width: tableWidth,
+        height: 1,
+        color: borderColor
+      });
+      y -= rowHeight;
+    }
+
     y -= 6;
   };
 
-  const writeTiming = (startedAt: string | null | undefined, completedAt: string | null | undefined) => {
-    const startedMs = tryParseDateMs(startedAt ?? null);
-    const completedMs = tryParseDateMs(completedAt ?? null);
+  const writeMarkdown = (rawText: string) => {
+    if (!rawText) return;
+    const lines = sanitizePdfText(rawText)
+      .replace(/\r\n/g, '\n')
+      .split('\n');
 
-    writeLine(`Started: ${startedMs ? new Date(startedMs).toLocaleString() : 'N/A'}`, { size: 10, color: muted });
-    writeLine(`Finished: ${completedMs ? new Date(completedMs).toLocaleString() : 'N/A'}`, { size: 10, color: muted });
-    if (startedMs != null && completedMs != null && completedMs >= startedMs) {
-      writeLine(`Duration: ${formatDuration(completedMs - startedMs)}`, { size: 10, color: muted });
-    } else {
-      writeLine('Duration: N/A', { size: 10, color: muted });
+    let inCodeBlock = false;
+    let inSourcesSection = false;
+    let i = 0;
+    while (i < lines.length) {
+      const line = lines[i] ?? '';
+
+      if (line.startsWith('```')) {
+        const lang = line.slice(3).trim().toLowerCase();
+        if (!inCodeBlock && !inSourcesSection && (lang === 'csv' || lang === 'tsv')) {
+          const delimiter = lang === 'tsv' ? '\t' : ',';
+          const blockLines: string[] = [];
+          i += 1;
+          while (i < lines.length && !(lines[i] ?? '').startsWith('```')) {
+            const blockLine = (lines[i] ?? '').trim();
+            if (blockLine) {
+              blockLines.push(blockLine);
+            }
+            i += 1;
+          }
+          if (i < lines.length && (lines[i] ?? '').startsWith('```')) {
+            i += 1;
+          }
+          const parsed = parseDelimitedTable(blockLines, delimiter);
+          if (parsed && parsed.headers.length > 1) {
+            y -= 4;
+            writeTable(parsed.headers, parsed.rows);
+            y -= 4;
+          } else {
+            for (const raw of blockLines) {
+              writeParagraph(stripInlineMarkdown(raw), { size: 9, color: muted });
+            }
+          }
+          continue;
+        }
+        inCodeBlock = !inCodeBlock;
+        i += 1;
+        continue;
+      }
+      if (inCodeBlock) {
+        writeLine(`  ${line}`, { size: 9, color: muted });
+        i += 1;
+        continue;
+      }
+
+      if (!inSourcesSection && isTableLine(line)) {
+        const tableLines: string[] = [];
+        while (i < lines.length && (isTableLine(lines[i] ?? '') || isTableSeparator(lines[i] ?? ''))) {
+          tableLines.push(lines[i] ?? '');
+          i += 1;
+        }
+        const parsed = parsePipeTable(tableLines);
+        if (parsed && parsed.headers.length > 0) {
+          y -= 4;
+          writeTable(parsed.headers, parsed.rows);
+          y -= 4;
+        } else {
+          for (const tl of tableLines) {
+            writeParagraph(stripInlineMarkdown(tl), { size: 9, color: muted });
+          }
+        }
+        continue;
+      }
+
+      if (!inSourcesSection && (isLikelyDelimitedLine(line, ',') || isLikelyDelimitedLine(line, '\t'))) {
+        const delimiter = isLikelyDelimitedLine(line, '\t') ? '\t' : ',';
+        const tableLines: string[] = [];
+        while (i < lines.length && isLikelyDelimitedLine(lines[i] ?? '', delimiter)) {
+          tableLines.push((lines[i] ?? '').trim());
+          i += 1;
+        }
+        const parsed = parseDelimitedTable(tableLines, delimiter);
+        if (parsed && parsed.headers.length > 1) {
+          y -= 4;
+          writeTable(parsed.headers, parsed.rows);
+          y -= 4;
+        } else {
+          for (const raw of tableLines) {
+            writeParagraph(stripInlineMarkdown(raw), { size: 9, color: muted });
+          }
+        }
+        continue;
+      }
+
+      if (!line.trim()) {
+        ensureSpace(lineHeight);
+        y -= Math.round(bodyFontSize * 0.5);
+        i += 1;
+        continue;
+      }
+
+      if (line.startsWith('# ')) {
+        const text = line.slice(2).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
+        ensureSpace(36);
+        y -= 8;
+        writeLine(text, { bold: true, size: 16, color: ink });
+        y -= 4;
+        i += 1;
+        continue;
+      }
+
+      if (line.startsWith('## ')) {
+        const text = line.slice(3).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
+        writeSectionHeading(text, brand);
+        i += 1;
+        continue;
+      }
+
+      if (line.startsWith('### ')) {
+        const text = line.slice(4).replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
+        ensureSpace(26);
+        y -= 4;
+        writeLine(text, { bold: true, size: 13, color: ink });
+        y -= 2;
+        i += 1;
+        continue;
+      }
+
+      if (/^#{4,6} /.test(line)) {
+        const text = line.replace(/^#{4,6} /, '').replace(/\*\*/g, '').trim();
+        inSourcesSection = /^sources?\b|^references?\b/i.test(text);
+        writeLine(text, { bold: true, size: bodyFontSize, color: ink });
+        i += 1;
+        continue;
+      }
+
+      if (/^[-*_]{3,}$/.test(line.trim())) {
+        ensureSpace(lineHeight);
+        const { width } = page.getSize();
+        page.drawRectangle({
+          x: margin,
+          y: y + 4,
+          width: width - margin * 2,
+          height: 1,
+          color: rgb(229 / 255, 231 / 255, 235 / 255)
+        });
+        y -= lineHeight;
+        i += 1;
+        continue;
+      }
+
+      if (/^[\s]*[-*+] /.test(line)) {
+        const indent = line.match(/^(\s*)/)?.[1]?.length ?? 0;
+        const nestLevel = Math.floor(indent / 2);
+        const bulletX = margin + 10 + nestLevel * 14;
+        const textContent = line.replace(/^[\s]*[-*+] /, '').trim();
+        const rendered = stripInlineMarkdown(textContent);
+
+        ensureSpace(lineHeight);
+        page.drawText('•', {
+          x: bulletX,
+          y,
+          size: bodyFontSize,
+          font: fontBold,
+          color: ink
+        });
+        const textX = bulletX + 12;
+        const textMaxWidth = maxWidth - (textX - margin);
+        writeWrappedTextAt(rendered, textX, textMaxWidth);
+        i += 1;
+        continue;
+      }
+
+      if (/^[\s]*\d+\. /.test(line)) {
+        const numMatch = line.match(/^([\s]*)(\d+)\. (.*)/);
+        if (numMatch) {
+          const indent = numMatch[1]?.length ?? 0;
+          const num = numMatch[2];
+          const textContent = (numMatch[3] ?? '').trim();
+          const nestLevel = Math.floor(indent / 2);
+          const numX = margin + 10 + nestLevel * 14;
+          const rendered = stripInlineMarkdown(textContent);
+
+          ensureSpace(lineHeight);
+          page.drawText(`${num}.`, {
+            x: numX,
+            y,
+            size: bodyFontSize,
+            font,
+            color: ink
+          });
+          const textX = numX + 20;
+          const textMaxWidth = maxWidth - (textX - margin);
+          writeWrappedTextAt(rendered, textX, textMaxWidth);
+          i += 1;
+          continue;
+        }
+      }
+
+      if (line.startsWith('> ')) {
+        const text = stripInlineMarkdown(line.slice(2).trim());
+        ensureSpace(lineHeight + 4);
+        page.drawRectangle({
+          x: margin,
+          y: y - 2,
+          width: 3,
+          height: lineHeight,
+          color: muted
+        });
+        writeParagraph(text, { size: bodyFontSize, color: muted });
+        i += 1;
+        continue;
+      }
+
+      const boldOnlyMatch = line.match(/^\*\*([^*]+)\*\*\s*:?\s*$/);
+      if (boldOnlyMatch) {
+        writeLine((boldOnlyMatch[1] ?? '').trim(), { bold: true, size: bodyFontSize + 1, color: ink });
+        i += 1;
+        continue;
+      }
+
+      const rendered = stripInlineMarkdown(line);
+      writeParagraph(rendered, { size: bodyFontSize });
+      i += 1;
     }
-    y -= 4;
   };
-
-  const openaiFallbackBullets = toSentenceBullets(input.openaiText ?? '', 2);
-  const geminiFallbackBullets = toSentenceBullets(input.geminiText ?? '', 2);
-  const openaiSummary =
-    (input.openaiSummary ?? '').trim() ||
-    (openaiFallbackBullets.length ? openaiFallbackBullets.join(' ') : 'No OpenAI result available.');
-  const geminiSummary =
-    (input.geminiSummary ?? '').trim() ||
-    (geminiFallbackBullets.length ? geminiFallbackBullets.join(' ') : 'No Gemini result available.');
 
   writeLine(`Created: ${new Date(input.createdAt).toLocaleString()}`, { size: 10, color: muted });
   writeLine(`Session: ${input.sessionId}`, { size: 10, color: muted });
@@ -504,65 +899,37 @@ export async function buildPdfReport(
   writeParagraph(input.refinedPrompt ?? 'N/A', { size: bodyFontSize });
   y -= 8;
 
-  writeSectionHeading('Executive Summary', brand);
-  if (input.summaryMode === 'one') {
-    writeProviderSummary('Summary', brand, openaiSummary);
-  } else {
-    writeProviderSummary('OpenAI summary', openaiAccent, openaiSummary);
-    writeProviderSummary('Gemini summary', geminiAccent, geminiSummary);
-  }
-  y -= 10;
+  y -= 6;
+  const openaiRefsInput = input.references?.openai ?? [];
+  const geminiRefsInput = input.references?.gemini ?? [];
+  const openaiRefs =
+    openaiRefsInput.length > 0
+      ? sanitizeRefs(openaiRefsInput)
+      : deriveRefsFromText(stripEmbeddedSourcesSection(input.openaiText ?? ''));
+  const geminiRefs =
+    geminiRefsInput.length > 0
+      ? sanitizeRefs(geminiRefsInput)
+      : deriveRefsFromText(stripEmbeddedSourcesSection(input.geminiText ?? ''));
 
-  writeSectionHeading('Full Results', brand);
+  const overviewText = (input.comparisonSection && input.comparisonSection.trim()) || 'Comparison not available.';
+  const openaiBody = replaceUrlsWithReferenceNumbers(
+    stripEmbeddedSourcesSection(input.openaiText ?? 'No result'),
+    openaiRefs
+  );
+  const geminiBody = replaceUrlsWithReferenceNumbers(
+    stripEmbeddedSourcesSection(input.geminiText ?? 'No result'),
+    geminiRefs
+  );
 
-  writeLine('OpenAI deep research', { bold: true, size: 12, color: openaiAccent });
-  writeTiming(input.openaiStartedAt, input.openaiCompletedAt);
-  writeParagraph(input.openaiText ?? 'No result', { size: bodyFontSize });
-  y -= 8;
+  const overviewSection = `# Overview\n\n${demoteHeadings(overviewText)}`;
+  const openaiSection =
+    `# OpenAI\n\n## Run Timing\n\n${timingMarkdown(input.openaiStartedAt, input.openaiCompletedAt)}\n\n` +
+    `${demoteHeadings(openaiBody)}${buildSourcesSection(openaiRefs)}`;
+  const geminiSection =
+    `# Gemini\n\n## Run Timing\n\n${timingMarkdown(input.geminiStartedAt, input.geminiCompletedAt)}\n\n` +
+    `${demoteHeadings(geminiBody)}${buildSourcesSection(geminiRefs)}`;
 
-  writeLine('Gemini research', { bold: true, size: 12, color: geminiAccent });
-  writeTiming(input.geminiStartedAt, input.geminiCompletedAt);
-  writeParagraph(input.geminiText ?? 'No result', { size: bodyFontSize });
-
-  if (input.references?.openai?.length || input.references?.gemini?.length) {
-    y -= 10;
-    writeSectionHeading('References', brand);
-    if (input.references?.openai?.length) {
-      writeLine('OpenAI references', { bold: true, size: 12, color: openaiAccent });
-      for (const ref of input.references.openai) {
-        const segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [
-          { text: `[${ref.n}]`, url: ref.url },
-          { text: ' ' }
-        ];
-        if (ref.title) {
-          segments.push({ text: `${ref.title} — ` });
-        }
-        segments.push({ text: ref.url, url: ref.url });
-        if (ref.accessedAt) {
-          segments.push({ text: ` (accessed ${ref.accessedAt})` });
-        }
-        writeLinkedParagraph(segments, { size: 10, color: muted });
-      }
-      y -= 6;
-    }
-    if (input.references?.gemini?.length) {
-      writeLine('Gemini references', { bold: true, size: 12, color: geminiAccent });
-      for (const ref of input.references.gemini) {
-        const segments: Array<{ text: string; url?: string; color?: ReturnType<typeof rgb> }> = [
-          { text: `[${ref.n}]`, url: ref.url },
-          { text: ' ' }
-        ];
-        if (ref.title) {
-          segments.push({ text: `${ref.title} — ` });
-        }
-        segments.push({ text: ref.url, url: ref.url });
-        if (ref.accessedAt) {
-          segments.push({ text: ` (accessed ${ref.accessedAt})` });
-        }
-        writeLinkedParagraph(segments, { size: 10, color: muted });
-      }
-    }
-  }
+  writeMarkdown([overviewSection, openaiSection, geminiSection].join('\n\n---\n\n'));
 
   const pages = pdfDoc.getPages();
   for (let i = 0; i < pages.length; i++) {

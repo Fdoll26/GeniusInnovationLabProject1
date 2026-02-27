@@ -55,7 +55,10 @@ Set:
 
 Optional:
 - `GEMINI_API_BASE` (defaults to `https://generativelanguage.googleapis.com/v1beta`)
-- `GEMINI_MODEL`
+- `GEMINI_MODEL` (legacy fallback; defaults to `gemini-2.5-pro`)
+- `GEMINI_DEEP_MODEL` (deep/synthesis steps; defaults to `GEMINI_MODEL`)
+- `GEMINI_FAST_MODEL` (fast/scout steps; defaults to `gemini-2.0-flash`)
+- `GEMINI_SUBCALL_MODEL` (fan-out subcalls; defaults to `GEMINI_FAST_MODEL`)
 
 ## SendGrid (Required unless stubbing email)
 
@@ -70,4 +73,3 @@ To run most flows without real provider credentials:
 - `DEV_STUB_EXTERNALS=true`
 
 You still need PostgreSQL (`DATABASE_URL`) for persistence.
-

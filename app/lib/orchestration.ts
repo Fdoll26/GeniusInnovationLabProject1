@@ -1,6 +1,14 @@
 import './debug-errors';
-import { getResponseOutputText, getResponseSources, pollDeepResearch, startResearchJob, startRefinement, rewritePrompt, summarizeForReport } from './openai-client';
-import { runGemini, rewritePromptGemini, startRefinementGemini, summarizeForReportGemini } from './gemini-client';
+import {
+  generateModelComparisonOpenAI,
+  getResponseOutputText,
+  getResponseSources,
+  pollDeepResearch,
+  rewritePrompt,
+  startRefinement,
+  startResearchJob
+} from './openai-client';
+import { generateModelComparisonGemini, runGemini, rewritePromptGemini, startRefinementGemini } from './gemini-client';
 import { createQuestions, getNextQuestion, listQuestions } from './refinement-repo';
 import { updateSessionState, getSessionById } from './session-repo';
 import { listProviderResults, upsertProviderResult } from './provider-repo';
@@ -26,11 +34,30 @@ import { buildFallbackResearchPlan } from './research-plan-schema';
 import { STEP_LABELS, STEP_SEQUENCE } from './research-types';
 
 const inMemorySessionLocks = new Set<string>();
+const lastLockClientErrorLogAt = new Map<string, number>();
 
 async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): Promise<T | null> {
   const lockKey = `session_run:${sessionId}`;
   if (pool) {
     const client = await pool.connect();
+    const onClientError = (error: unknown) => {
+      const now = Date.now();
+      const key = `${sessionId}:${lockKey}`;
+      const last = lastLockClientErrorLogAt.get(key) ?? 0;
+      if (now - last >= 60_000) {
+        lastLockClientErrorLogAt.set(key, now);
+        console.error('[db.client_error][session_run_lock]', {
+          sessionId,
+          lockKey,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    };
+    const clientWithEvents = client as unknown as {
+      on: (event: 'error', listener: (error: unknown) => void) => void;
+      off: (event: 'error', listener: (error: unknown) => void) => void;
+    };
+    clientWithEvents.on('error', onClientError);
     try {
       const result = await client.query<{ ok: boolean }>('SELECT pg_try_advisory_lock(hashtext($1)) AS ok', [lockKey]);
       if (!result.rows[0]?.ok) {
@@ -46,6 +73,7 @@ async function withSessionRunLock<T>(sessionId: string, fn: () => Promise<T>): P
         }
       }
     } finally {
+      clientWithEvents.off('error', onClientError);
       client.release();
     }
   }
@@ -103,34 +131,39 @@ export async function regenerateReportForSession(
   const openaiTextWithRefs = openaiResult?.output_text ? replaceLinksWithRefs(openaiResult.output_text, globalRefMap) : null;
   const geminiTextWithRefs = geminiResult?.output_text ? replaceLinksWithRefs(geminiResult.output_text, globalRefMap) : null;
 
-  const includeRefs = false;
-  type SummaryRef = { n: number; title?: string; url: string; accessedAt?: string };
-  const summarize = async (provider: 'OpenAI' | 'Gemini' | 'Combined', text: string, refs: SummaryRef[]) => {
-    const cleanText = stripSourcesSections(text);
-    if (settings.summarize_provider === 'gemini') {
-      return summarizeForReportGemini(
-        { provider, researchText: cleanText, references: refs },
-        { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000, includeRefs }
-      );
+  let comparisonSection = '';
+  const comparisonOpenaiText = (openaiTextWithRefs ?? '').trim();
+  const comparisonGeminiText = (geminiTextWithRefs ?? '').trim();
+
+  if (comparisonOpenaiText || comparisonGeminiText) {
+    try {
+      if (settings.summarize_provider === 'gemini') {
+        comparisonSection = await generateModelComparisonGemini(
+          {
+            openaiReport: comparisonOpenaiText || 'No OpenAI result available.',
+            geminiReport: comparisonGeminiText || 'No Gemini result available.',
+            topic: session.topic
+          },
+          { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000 }
+        );
+      } else {
+        comparisonSection = await generateModelComparisonOpenAI(
+          {
+            openaiReport: comparisonOpenaiText || 'No OpenAI result available.',
+            geminiReport: comparisonGeminiText || 'No Gemini result available.',
+            topic: session.topic
+          },
+          { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000 }
+        );
+      }
+    } catch (error) {
+      console.error('Model comparison generation failed, proceeding without it', error);
+      comparisonSection = 'Model comparison could not be generated.';
     }
-    return summarizeForReport(
-      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: cleanText, references: refs },
-      { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000, includeRefs }
-    );
-  };
-
-  let finalOpenaiSummary = 'No OpenAI result available.';
-  let finalGeminiSummary = 'No Gemini result available.';
-
-  if (settings.report_summary_mode === 'one') {
-    const combinedText = [openaiTextWithRefs, geminiTextWithRefs].filter(Boolean).join('\n\n');
-    const combinedRefs = [...openaiRefs, ...geminiRefs];
-    finalOpenaiSummary = combinedText ? await summarize('Combined', combinedText, combinedRefs) : 'No research result available.';
-    finalGeminiSummary = '';
-  } else {
-    finalOpenaiSummary = openaiTextWithRefs ? await summarize('OpenAI', openaiTextWithRefs, openaiRefs) : finalOpenaiSummary;
-    finalGeminiSummary = geminiTextWithRefs ? await summarize('Gemini', geminiTextWithRefs, geminiRefs) : finalGeminiSummary;
   }
+
+  const finalOpenaiSummary = comparisonOpenaiText ? '' : 'No OpenAI result available.';
+  const finalGeminiSummary = comparisonGeminiText ? '' : 'No Gemini result available.';
 
   const pdfBuffer = await buildPdfReport(
     {
@@ -140,6 +173,7 @@ export async function regenerateReportForSession(
       summaryMode: settings.report_summary_mode,
       openaiSummary: finalOpenaiSummary,
       geminiSummary: finalGeminiSummary,
+      comparisonSection,
       references: {
         openai: openaiRefs,
         gemini: geminiRefs
@@ -432,19 +466,6 @@ function parseJson<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
-function stripSourcesSections(text: string): string {
-  const normalized = text.replace(/\r\n/g, '\n');
-  const markers = ['\n## Unified Sources', '\n## Sources', '\n# Sources', '\nSources\n'];
-  let cut = -1;
-  for (const marker of markers) {
-    const idx = normalized.indexOf(marker);
-    if (idx >= 0 && (cut < 0 || idx < cut)) {
-      cut = idx;
-    }
-  }
-  return cut < 0 ? normalized : normalized.slice(0, cut).trim();
-}
-
 function sanitizeSourcesForProviderResult(sources: unknown): Array<Record<string, unknown>> | null {
   if (!Array.isArray(sources)) return null;
   const out: Array<Record<string, unknown>> = [];
@@ -488,7 +509,7 @@ async function ensureStubResearchRun(params: {
   const maxSteps = STEP_SEQUENCE.length;
   const targetSourcesPerStep = clamp(settings.research_target_sources_per_step, 1, 25);
   const maxTotalSources = clamp(settings.research_max_total_sources, 5, 400);
-  const maxTokensPerStep = clamp(settings.research_max_tokens_per_step, 300, 8000);
+  const maxTokensPerStep = clamp(settings.research_max_tokens_per_step, 300, 32768);
   const plan = buildFallbackResearchPlan({
     refinedTopic: params.question,
     sourceTarget: targetSourcesPerStep,
@@ -1437,36 +1458,39 @@ async function finalizeReportUnlocked(
     return;
   }
 
-  const includeRefs = false;
-  type SummaryRef = { n: number; title?: string; url: string; accessedAt?: string };
-  const summarize = async (provider: 'OpenAI' | 'Gemini' | 'Combined', text: string, refs: SummaryRef[]) => {
-    const cleanText = stripSourcesSections(text);
-    if (settings.summarize_provider === 'gemini') {
-      return summarizeForReportGemini(
-        { provider, researchText: cleanText, references: refs },
-        { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000, includeRefs }
-      );
+  let comparisonSection = '';
+  const comparisonOpenaiText = (openaiTextWithRefs ?? '').trim();
+  const comparisonGeminiText = (geminiTextWithRefs ?? '').trim();
+
+  if (comparisonOpenaiText || comparisonGeminiText) {
+    try {
+      if (settings.summarize_provider === 'gemini') {
+        comparisonSection = await generateModelComparisonGemini(
+          {
+            openaiReport: comparisonOpenaiText || 'No OpenAI result available.',
+            geminiReport: comparisonGeminiText || 'No Gemini result available.',
+            topic: session.topic
+          },
+          { stub: opts?.stub ?? false, timeoutMs: settings.gemini_timeout_minutes * 60_000 }
+        );
+      } else {
+        comparisonSection = await generateModelComparisonOpenAI(
+          {
+            openaiReport: comparisonOpenaiText || 'No OpenAI result available.',
+            geminiReport: comparisonGeminiText || 'No Gemini result available.',
+            topic: session.topic
+          },
+          { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000 }
+        );
+      }
+    } catch (error) {
+      console.error('Model comparison generation failed, proceeding without it', error);
+      comparisonSection = 'Model comparison could not be generated.';
     }
-    return summarizeForReport(
-      { provider: provider === 'Combined' ? 'OpenAI' : provider, researchText: cleanText, references: refs },
-      { stub: opts?.stub ?? false, timeoutMs: settings.openai_timeout_minutes * 60_000, includeRefs }
-    );
-  };
-
-  let finalOpenaiSummary = 'No OpenAI result available.';
-  let finalGeminiSummary = 'No Gemini result available.';
-
-  if (settings.report_summary_mode === 'one') {
-    const combinedText = [openaiTextWithRefs, geminiTextWithRefs].filter(Boolean).join('\n\n');
-    const combinedRefs = [...openaiRefs, ...geminiRefs];
-    finalOpenaiSummary = combinedText
-      ? await summarize('Combined', combinedText, combinedRefs)
-      : 'No research result available.';
-    finalGeminiSummary = '';
-  } else {
-    finalOpenaiSummary = openaiTextWithRefs ? await summarize('OpenAI', openaiTextWithRefs, openaiRefs) : finalOpenaiSummary;
-    finalGeminiSummary = geminiTextWithRefs ? await summarize('Gemini', geminiTextWithRefs, geminiRefs) : finalGeminiSummary;
   }
+
+  const finalOpenaiSummary = comparisonOpenaiText ? '' : 'No OpenAI result available.';
+  const finalGeminiSummary = comparisonGeminiText ? '' : 'No Gemini result available.';
 
   let pdfBuffer: Buffer | null = null;
   let pdfError: string | null = null;
@@ -1479,6 +1503,7 @@ async function finalizeReportUnlocked(
         summaryMode: settings.report_summary_mode,
         openaiSummary: finalOpenaiSummary,
         geminiSummary: finalGeminiSummary,
+        comparisonSection,
         openaiStartedAt: openaiResult?.started_at ?? null,
         openaiCompletedAt: openaiResult?.completed_at ?? null,
         geminiStartedAt: geminiResult?.started_at ?? null,

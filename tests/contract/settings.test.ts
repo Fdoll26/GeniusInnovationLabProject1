@@ -1,8 +1,13 @@
 // @vitest-environment node
 import { describe, expect, it, vi } from 'vitest';
 
+const requireSession = vi.fn(async () => ({ user: { email: 'user@example.com' } }));
 vi.mock('../../app/lib/authz', () => ({
-  requireSession: vi.fn(async () => ({ user: { email: 'user@example.com' } }))
+  requireSession: (...args: any[]) => requireSession(...args),
+  unauthorizedResponse: (error: unknown) =>
+    error instanceof Error && error.message === 'Unauthorized'
+      ? Response.json({ error: 'Unauthorized' }, { status: 401 })
+      : null
 }));
 vi.mock('../../app/lib/session-repo', () => ({
   getUserIdByEmail: vi.fn(async () => 'user-id')
@@ -44,5 +49,12 @@ describe('/api/settings', () => {
     expect(upsertUserSettings).toHaveBeenCalledWith('user-id', { theme: 'dark' });
     expect(await res.json()).toEqual({ user_id: 'user-id', theme: 'dark' });
   });
-});
 
+  it('returns 401 when session is missing', async () => {
+    requireSession.mockRejectedValueOnce(new Error('Unauthorized'));
+
+    const res = await GET();
+    expect(res.status).toBe(401);
+    expect(await res.json()).toEqual({ error: 'Unauthorized' });
+  });
+});

@@ -33,32 +33,37 @@ function parseJson<T>(value: unknown, fallback: T): T {
   return value as T;
 }
 
-function getExecutionStepSequence(run: NonNullable<Awaited<ReturnType<typeof getResearchRunById>>>): Array<(typeof STEP_SEQUENCE)[number]> {
-  const fallback = STEP_SEQUENCE.slice(0, clamp(run.max_steps, 1, STEP_SEQUENCE.length));
-  const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
+function deriveCanonicalStepTypesFromPlan(
+  plan: ResearchPlan | null,
+  maxSteps: number
+): Array<(typeof STEP_SEQUENCE)[number]> {
+  const fallback = STEP_SEQUENCE.slice(0, clamp(maxSteps, 1, STEP_SEQUENCE.length));
   if (!plan || !Array.isArray(plan.steps) || plan.steps.length === 0) {
     return fallback;
   }
 
-  const ordered = [...plan.steps]
-    .filter(
-      (step): step is ResearchPlan['steps'][number] =>
-        Boolean(step) && typeof step === 'object' && typeof step.step_type === 'string' && STEP_SEQUENCE.includes(step.step_type)
-    )
-    .sort((a, b) => a.step_index - b.step_index);
-
-  if (ordered.length === 0) {
-    return fallback;
-  }
-
-  const deduped: Array<(typeof STEP_SEQUENCE)[number]> = [];
-  for (const step of ordered) {
-    if (!deduped.includes(step.step_type)) {
-      deduped.push(step.step_type);
+  const requestedTypes = new Set<(typeof STEP_SEQUENCE)[number]>();
+  for (const step of plan.steps) {
+    if (
+      step &&
+      typeof step === 'object' &&
+      typeof step.step_type === 'string' &&
+      STEP_SEQUENCE.includes(step.step_type as (typeof STEP_SEQUENCE)[number])
+    ) {
+      requestedTypes.add(step.step_type as (typeof STEP_SEQUENCE)[number]);
     }
   }
 
-  return deduped.length > 0 ? deduped : fallback;
+  if (requestedTypes.size === 0) {
+    return fallback;
+  }
+  // Once the plan is accepted, execution always runs in canonical order.
+  return STEP_SEQUENCE.slice(0, clamp(maxSteps, 1, STEP_SEQUENCE.length));
+}
+
+function getExecutionStepSequence(run: NonNullable<Awaited<ReturnType<typeof getResearchRunById>>>): Array<(typeof STEP_SEQUENCE)[number]> {
+  const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
+  return deriveCanonicalStepTypesFromPlan(plan, run.max_steps);
 }
 
 function clamp(n: number, min: number, max: number) {
@@ -73,6 +78,9 @@ function defaultWordTarget(depth: 'light' | 'standard' | 'deep') {
 
 function isRetryableResearchError(error: unknown): boolean {
   const text = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  if (isHardQuotaExhaustionError(error)) {
+    return false;
+  }
   return (
     text.includes('429') ||
     text.includes('rate limit') ||
@@ -87,11 +95,47 @@ function isRetryableResearchError(error: unknown): boolean {
   );
 }
 
+function isHardQuotaExhaustionError(error: unknown): boolean {
+  const text = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+  return (
+    (text.includes('quota exceeded') || text.includes('resource_exhausted')) &&
+    (text.includes('per_day') ||
+      text.includes('generate_requests_per_model_per_day') ||
+      text.includes('plan and billing') ||
+      text.includes('check your plan and billing'))
+  );
+}
+
+const MAX_RETRYABLE_STEP_ERRORS = Number.parseInt(process.env.RESEARCH_STEP_MAX_RETRYABLE_ERRORS ?? '3', 10);
+const MAX_GAP_CHECK_RETRIES = 2;
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  return value as Record<string, unknown>;
+}
+
+function getRetryableErrorCount(providerNative: unknown): number {
+  const record = asRecord(providerNative);
+  const count = Number(record?.retryable_error_count);
+  if (!Number.isFinite(count) || count < 0) {
+    return 0;
+  }
+  return Math.trunc(count);
+}
+
 function summarizePriorSteps(steps: Awaited<ReturnType<typeof listResearchSteps>>) {
-  return steps
-    .slice(-4)
-    .map((s) => `Step ${s.step_index + 1} ${s.step_type}: ${(s.output_excerpt || s.raw_output || '').slice(0, 320)}`)
-    .join('\n');
+  const sorted = [...steps].sort((a, b) => a.step_index - b.step_index);
+  return sorted
+    .map((s, idx) => {
+      const isLatest = idx === sorted.length - 1;
+      const isPrevious = idx === sorted.length - 2;
+      const charLimit = isLatest ? 24000 : isPrevious ? 16000 : 8000;
+      const text = (s.raw_output || s.output_excerpt || '').slice(0, charLimit);
+      return `Step ${s.step_index + 1} [${s.step_type}]:\n${text}`;
+    })
+    .join('\n\n---\n\n');
 }
 
 function chunkTextForStorage(text: string, maxChars = 4000): Array<{ index: number; text: string }> {
@@ -130,8 +174,9 @@ async function executePlannedStep(params: {
   stepId: (typeof STEP_SEQUENCE)[number];
   currentIndex: number;
   totalSteps: number;
+  gapLoops: number;
 }) {
-  const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps } = params;
+  const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps, gapLoops } = params;
   const existingSteps = await listResearchSteps(runId);
   const runStartedAt =
     existingSteps
@@ -158,11 +203,26 @@ async function executePlannedStep(params: {
       step_id: stepId,
       step_index: currentIndex,
       total_steps: totalSteps,
-      step_label: STEP_LABELS[stepId]
+      step_label: STEP_LABELS[stepId],
+      gap_loops: gapLoops
     }
   });
 
   const stepsNow = await listResearchSteps(runId);
+  const sortedSteps = [...stepsNow].sort((a, b) => a.step_index - b.step_index);
+  const prevStep = sortedSteps.filter((s) => s.step_index < currentIndex && s.status === 'done').slice(-1)[0];
+  const prevStepFullOutput = prevStep?.raw_output ?? prevStep?.output_excerpt ?? null;
+  const summary = summarizePriorSteps(stepsNow);
+  const stepsNeedingFullPrior = new Set<(typeof STEP_SEQUENCE)[number]>([
+    'SHORTLIST_RESULTS',
+    'EXTRACT_EVIDENCE',
+    'COUNTERPOINTS',
+    'GAP_CHECK'
+  ]);
+  const priorStepContext =
+    stepsNeedingFullPrior.has(stepId) && prevStepFullOutput
+      ? `FULL OUTPUT FROM PREVIOUS STEP [${prevStep?.step_type ?? 'unknown'}]:\n${prevStepFullOutput.slice(0, 32768)}\n\n---\n\nSUMMARY OF EARLIER STEPS:\n${summary}`
+      : summary;
   const plan = parseJson<ResearchPlan | null>(run.research_plan_json, null);
   const artifact = await executePipelineStep({
     provider: run.provider,
@@ -170,9 +230,9 @@ async function executePlannedStep(params: {
     question: run.question,
     timeoutMs: (run.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000,
     plan,
-    priorStepSummary: summarizePriorSteps(stepsNow),
+    priorStepSummary: priorStepContext,
     sourceTarget: clamp(run.target_sources_per_step, 1, run.provider === 'gemini' ? 100 : 30),
-    maxOutputTokens: clamp(run.max_tokens_per_step, 300, 8000),
+    maxOutputTokens: clamp(run.max_tokens_per_step, 300, 32768),
     maxCandidates: providerCfg.max_candidates,
     shortlistSize: providerCfg.shortlist_size
   });
@@ -233,6 +293,35 @@ async function executePlannedStep(params: {
   return { status: 'done' as const, artifact };
 }
 
+async function resetStepsFromIndex(params: {
+  runId: string;
+  run: NonNullable<Awaited<ReturnType<typeof getResearchRunById>>>;
+  executionSteps: Array<(typeof STEP_SEQUENCE)[number]>;
+  fromIndex: number;
+}) {
+  const { runId, run, executionSteps, fromIndex } = params;
+  for (let idx = fromIndex; idx < executionSteps.length; idx++) {
+    const stepType = executionSteps[idx];
+    await upsertResearchStep({
+      runId,
+      stepIndex: idx,
+      stepType,
+      status: 'queued',
+      provider: run.provider,
+      mode: run.mode,
+      stepGoal: null,
+      inputsSummary: null,
+      rawOutput: null,
+      outputExcerpt: null,
+      sources: null,
+      evidence: null,
+      citationMap: null,
+      providerNative: null,
+      errorMessage: null
+    });
+  }
+}
+
 export async function startRun(params: {
   sessionId: string;
   userId: string;
@@ -251,7 +340,7 @@ export async function startRun(params: {
     maxSteps: STEP_SEQUENCE.length,
     targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
     maxTotalSources: clamp(settings.research_max_total_sources, 5, 400),
-    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
+    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 32768),
     minWordCount: defaultWordTarget(settings.research_depth)
   });
 
@@ -261,9 +350,12 @@ export async function startRun(params: {
     depth: settings.research_depth,
     maxSteps: STEP_SEQUENCE.length,
     targetSourcesPerStep: clamp(settings.research_target_sources_per_step, 1, params.provider === 'gemini' ? 100 : 25),
-    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 8000),
+    maxTokensPerStep: clamp(settings.research_max_tokens_per_step, 300, 32768),
     timeoutMs: (params.provider === 'openai' ? settings.openai_timeout_minutes : settings.gemini_timeout_minutes) * 60_000
   });
+  const canonicalStepsForInit = deriveCanonicalStepTypesFromPlan(generatedPlan.plan, STEP_SEQUENCE.length);
+  const planStepByType = new Map(generatedPlan.plan.steps.map((s) => [s.step_type, s] as const));
+  const plannedStepCount = canonicalStepsForInit.length > 0 ? canonicalStepsForInit.length : STEP_SEQUENCE.length;
 
   await updateResearchRun({
     runId: run.id,
@@ -275,7 +367,7 @@ export async function startRun(params: {
     progress: {
       step_id: null,
       step_index: 0,
-      total_steps: STEP_SEQUENCE.length,
+      total_steps: plannedStepCount,
       step_label: null,
       gap_loops: 0
     }
@@ -285,12 +377,17 @@ export async function startRun(params: {
     runId: run.id,
     provider: run.provider,
     mode: run.mode,
-    steps: generatedPlan.plan.steps.map((step, idx) => ({
-      stepIndex: step.step_index ?? idx,
-      stepType: step.step_type,
-      stepGoal: step.objective,
-      inputsSummary: `planned queries=${step.search_query_pack.length} source_types=${step.target_source_types.length}`
-    }))
+    steps: canonicalStepsForInit.map((stepType, idx) => {
+      const planStep = planStepByType.get(stepType);
+      return {
+        stepIndex: idx,
+        stepType,
+        stepGoal: planStep?.objective ?? `Execute ${stepType.toLowerCase().replace(/_/g, ' ')}`,
+        inputsSummary: planStep
+          ? `planned queries=${planStep.search_query_pack.length} source_types=${planStep.target_source_types.length}`
+          : 'canonical fallback step'
+      };
+    })
   });
 
   return {
@@ -321,6 +418,10 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
   const providerCfg = getResearchProviderConfig(run.provider);
   const executionSteps = getExecutionStepSequence(run);
   const totalSteps = executionSteps.length;
+  const progress = parseJson<Record<string, unknown>>(run.progress_json, {});
+  const gapLoopsRaw = Number(progress.gap_loops ?? 0);
+  const gapLoops = Number.isFinite(gapLoopsRaw) && gapLoopsRaw > 0 ? Math.trunc(gapLoopsRaw) : 0;
+  const maxGapLoops = Math.max(0, Math.min(providerCfg.max_gap_loops, MAX_GAP_CHECK_RETRIES));
 
   let currentIndex = clamp(run.current_step_index, 0, totalSteps);
   if (currentIndex >= totalSteps) {
@@ -342,7 +443,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
           step_id: executionSteps[currentIndex - 1],
           step_index: currentIndex - 1,
           total_steps: totalSteps,
-          step_label: STEP_LABELS[executionSteps[currentIndex - 1]]
+          step_label: STEP_LABELS[executionSteps[currentIndex - 1]],
+          gap_loops: gapLoops
         }
       });
       return { state: 'IN_PROGRESS', done: false };
@@ -350,13 +452,9 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
     const fromStep = executionSteps[currentIndex - 1];
     const toStep = executionSteps[currentIndex];
     if (!canTransitionStep(fromStep, toStep)) {
-      await updateResearchRun({
-        runId,
-        state: 'FAILED',
-        errorMessage: `Invalid step transition: ${fromStep} -> ${toStep}`,
-        completed: true
-      });
-      return { state: 'FAILED', done: true };
+      console.warn(
+        `[research-orchestrator] Unexpected step transition ${fromStep} -> ${toStep} for run ${runId}; continuing anyway.`
+      );
     }
   }
 
@@ -370,7 +468,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         step_id: currentIndex < totalSteps ? executionSteps[currentIndex] : null,
         step_index: currentIndex,
         total_steps: totalSteps,
-        step_label: currentIndex < totalSteps ? STEP_LABELS[executionSteps[currentIndex]] : null
+        step_label: currentIndex < totalSteps ? STEP_LABELS[executionSteps[currentIndex]] : null,
+        gap_loops: gapLoops
       }
     });
     if (currentIndex >= totalSteps) {
@@ -388,7 +487,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       providerCfg,
       stepId,
       currentIndex,
-      totalSteps
+      totalSteps,
+      gapLoops
     });
     const artifact = execution.artifact;
     const synthesizedText = (artifact.output_text_with_refs ?? artifact.raw_output_text ?? '').trim();
@@ -398,20 +498,25 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       await updateResearchRun({ runId, plan: nextPlan, state: 'PLANNED' });
     }
 
-    const progress = parseJson<Record<string, unknown>>(run.progress_json, {});
     if (stepId === 'GAP_CHECK' && artifact.structured_output) {
       const severe = Boolean((artifact.structured_output as Record<string, unknown>).severe_gaps);
-      const currentLoops = Number(progress.gap_loops ?? 0);
-      if (severe && currentLoops < providerCfg.max_gap_loops) {
+      if (severe && gapLoops < maxGapLoops) {
+        const loopBackIndex = 1;
+        await resetStepsFromIndex({
+          runId,
+          run,
+          executionSteps,
+          fromIndex: loopBackIndex
+        });
         await updateResearchRun({
           runId,
-          currentStepIndex: 1,
+          currentStepIndex: loopBackIndex,
           progress: {
-            step_id: executionSteps[1],
-            step_index: 1,
+            step_id: executionSteps[loopBackIndex],
+            step_index: loopBackIndex,
             total_steps: totalSteps,
-            step_label: STEP_LABELS[executionSteps[1]],
-            gap_loops: currentLoops + 1
+            step_label: STEP_LABELS[executionSteps[loopBackIndex]],
+            gap_loops: gapLoops + 1
           }
         });
         return { state: 'IN_PROGRESS', done: false };
@@ -444,7 +549,7 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         step_index: nextIndex,
         total_steps: totalSteps,
         step_label: isDone ? null : STEP_LABELS[executionSteps[nextIndex]],
-        gap_loops: Number(progress.gap_loops ?? 0)
+        gap_loops: gapLoops
       },
       state: isDone ? 'DONE' : 'IN_PROGRESS',
       synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? synthesizedText : undefined,
@@ -455,6 +560,34 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
     return { state: isDone ? 'DONE' : 'IN_PROGRESS', done: isDone };
   } catch (error) {
     if (isRetryableResearchError(error)) {
+      const retryableErrorCount = getRetryableErrorCount(existingCurrent?.provider_native_json) + 1;
+      if (retryableErrorCount > Math.max(1, MAX_RETRYABLE_STEP_ERRORS)) {
+        const terminalMessage = `Step ${stepId} exceeded retry limit after ${retryableErrorCount - 1} transient errors: ${
+          error instanceof Error ? error.message : 'Transient research step error'
+        }`;
+        await upsertResearchStep({
+          runId,
+          stepIndex: currentIndex,
+          stepType: stepId,
+          status: 'failed',
+          provider: run.provider,
+          mode: run.mode,
+          errorMessage: terminalMessage,
+          providerNative: {
+            retryable_error_count: retryableErrorCount - 1,
+            retry_exhausted: true
+          },
+          completed: true
+        });
+        await updateResearchRun({
+          runId,
+          state: 'FAILED',
+          errorMessage: terminalMessage,
+          completed: true
+        });
+        return { state: 'FAILED', done: true };
+      }
+
       await upsertResearchStep({
         runId,
         stepIndex: currentIndex,
@@ -462,7 +595,11 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         status: 'queued',
         provider: run.provider,
         mode: run.mode,
-        errorMessage: error instanceof Error ? error.message : 'Transient research step error'
+        errorMessage: error instanceof Error ? error.message : 'Transient research step error',
+        providerNative: {
+          retryable_error_count: retryableErrorCount,
+          last_retryable_error_at: new Date().toISOString()
+        }
       });
       return { state: 'IN_PROGRESS', done: false };
     }
