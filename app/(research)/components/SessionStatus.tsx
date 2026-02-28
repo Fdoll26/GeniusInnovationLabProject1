@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import LoadingBar from './LoadingBar';
 import { useSessionStatus } from '../hooks/useSessionStatus';
 import { STEP_LABELS } from '../../lib/research-types';
 
@@ -118,11 +119,7 @@ export default function SessionStatus({ sessionId }: { sessionId: string | null 
         {isActive ? <span className="spinner" aria-hidden /> : null}
         <span className="status-pill">{label}</span>
       </div>
-      {isActive ? (
-        <div className="progress-bar" aria-hidden>
-          <div className="progress-bar__fill" />
-        </div>
-      ) : null}
+      {isActive ? <LoadingBar /> : null}
       <small>Updated: {new Date(status.updatedAt).toLocaleString()}</small>
       {error ? <small className="muted">Refresh warning: {error}. Showing last known status.</small> : null}
       {isFailed ? <p role="alert">Session completed with errors.</p> : null}

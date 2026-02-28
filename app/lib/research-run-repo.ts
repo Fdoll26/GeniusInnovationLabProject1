@@ -243,7 +243,13 @@ export async function updateResearchRun(params: {
          clarifications_json = COALESCE($6, clarifications_json),
          research_brief_json = COALESCE($7, research_brief_json),
          research_plan_json = COALESCE($8, research_plan_json),
-         progress_json = COALESCE($9, progress_json),
+         progress_json = CASE
+           WHEN $9::jsonb IS NULL THEN progress_json
+           WHEN progress_json IS NULL THEN $9::jsonb
+           WHEN jsonb_typeof(progress_json) = 'object' AND jsonb_typeof($9::jsonb) = 'object'
+             THEN progress_json || $9::jsonb
+           ELSE $9::jsonb
+         END,
          synthesized_report_md = COALESCE($10, synthesized_report_md),
          synthesized_sources_json = COALESCE($11, synthesized_sources_json),
          synthesized_citation_map_json = COALESCE($12, synthesized_citation_map_json),

@@ -543,7 +543,8 @@ async function ensureStubResearchRun(params: {
       step_index: 0,
       total_steps: STEP_SEQUENCE.length,
       step_label: STEP_LABELS[STEP_SEQUENCE[0]],
-      gap_loops: 0
+      gap_loops: 0,
+      gap_check_attempts: 0
     }
   });
   await initializePlannedResearchSteps({

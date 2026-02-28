@@ -24,7 +24,7 @@ const retryBaseDelayMs = getEnvNumber('OPENAI_FETCH_RETRY_BASE_DELAY_MS') ?? 500
 const deepResearchConcurrency = Math.max(1, getEnvInt('OPENAI_DEEP_RESEARCH_CONCURRENCY') ?? 1);
 
 export type RefinementResponse = {
-  questions: string[];
+  questions: Array<{ question: string; options: string[] }>;
 };
 
 export type ReasoningLevel = 'low' | 'high';
@@ -639,7 +639,49 @@ export function getResponseWebSearchCallSources(data: unknown): Array<{ url: str
   return out;
 }
 
-function parseRefinementOutput(text: string): { questions: string[] } {
+function fallbackOptionsForQuestion(question: string): string[] {
+  const lower = question.toLowerCase();
+  if (/(time|date|year|recent|latest|range|period|historical)/.test(lower)) {
+    return ['Past 12 months', 'Past 5 years', 'Since 2020', 'All time'];
+  }
+  if (/(geo|geographic|region|country|market|location)/.test(lower)) {
+    return ['United States', 'Global', 'Europe', 'Asia-Pacific'];
+  }
+  if (/(depth|technical|detail|level)/.test(lower)) {
+    return ['High-level', 'Balanced depth', 'Technical deep dive'];
+  }
+  if (/(audience|stakeholder|who is this for)/.test(lower)) {
+    return ['Executives', 'Practitioners', 'General audience'];
+  }
+  return ['Most recent', 'US focus', 'Balanced depth'];
+}
+
+function normalizeRefinementQuestions(raw: unknown): Array<{ question: string; options: string[] }> {
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ question: string; options: string[] }> = [];
+  for (const item of raw) {
+    if (typeof item === 'string') {
+      const question = item.trim();
+      if (!question) continue;
+      out.push({ question, options: fallbackOptionsForQuestion(question) });
+      continue;
+    }
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+    const question = String(rec.question ?? '').trim();
+    if (!question) continue;
+    const options = Array.isArray(rec.options)
+      ? rec.options
+          .map((opt) => String(opt ?? '').trim())
+          .filter(Boolean)
+          .slice(0, 4)
+      : [];
+    out.push({ question, options: options.length ? options : fallbackOptionsForQuestion(question) });
+  }
+  return out.slice(0, 5);
+}
+
+function parseRefinementOutput(text: string): { questions: Array<{ question: string; options: string[] }> } {
   const trimmed = text.trim();
   if (!trimmed) {
     return { questions: [] };
@@ -652,6 +694,20 @@ function parseRefinementOutput(text: string): { questions: string[] } {
     return { questions: [] };
   }
 
+  const jsonCandidate = trimmed
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/\s*```$/, '');
+  try {
+    const parsed = JSON.parse(jsonCandidate) as { questions?: unknown };
+    const normalizedQuestions = normalizeRefinementQuestions(parsed?.questions);
+    if (normalizedQuestions.length) {
+      return { questions: normalizedQuestions };
+    }
+  } catch {
+    // fall through to legacy text parser
+  }
+
   const clarificationIndex = upper.indexOf('CLARIFICATION REQUIRED:');
   if (clarificationIndex >= 0) {
     const after = normalized.slice(clarificationIndex + 'CLARIFICATION REQUIRED:'.length).trim();
@@ -659,7 +715,12 @@ function parseRefinementOutput(text: string): { questions: string[] } {
       .split('\n')
       .map((line) => line.replace(/^\s*\d+\.\s*/, '').replace(/^[\-\*\s]+/, '').trim())
       .filter(Boolean);
-    return { questions: lines.slice(0, 5) };
+    return {
+      questions: lines.slice(0, 5).map((question) => ({
+        question,
+        options: fallbackOptionsForQuestion(question)
+      }))
+    };
   }
 
   // If the model deviates, default to no clarification questions to avoid polluting the refined prompt.
@@ -669,7 +730,10 @@ function parseRefinementOutput(text: string): { questions: string[] } {
 export async function startRefinement(topic: string, opts?: { stub?: boolean; timeoutMs?: number }): Promise<RefinementResponse> {
   if (opts?.stub) {
     return {
-      questions: ['What time range should we focus on?', 'Any geographic focus?']
+      questions: [
+        { question: 'What time range should we focus on?', options: ['Past 12 months', 'Past 5 years', 'Since 2020'] },
+        { question: 'Any geographic focus?', options: ['United States', 'Global', 'Europe'] }
+      ]
     };
   }
   const data = await request('/responses', {
@@ -679,16 +743,15 @@ export async function startRefinement(topic: string, opts?: { stub?: boolean; ti
       'Goal: make the question precise enough that step-by-step research produces a complete, high-quality final report.\n\n' +
       'Decision:\n' +
       '- If the question is already research-ready, output EXACTLY: NONE\n' +
-      '- Otherwise output:\n' +
-      'CLARIFICATION REQUIRED:\n' +
-      '1. ...\n' +
-      '2. ...\n\n' +
+      '- Otherwise output JSON only, using this shape:\n' +
+      '{"questions":[{"question":"...","options":["...","..."]}]}\n\n' +
       'Rules:\n' +
       '- Ask 1-5 questions max.\n' +
       '- Ask only high-impact questions that change research results.\n' +
       '- Prioritize: timeframe, geography, scope (entities/population), comparison baseline, success criteria, and desired output format.\n' +
+      '- For EACH question, include 2-4 short clickable options (2-4 words each) relevant to that exact question.\n' +
       '- No explanations, no answers, no meta-commentary.\n' +
-      '- Do not write anything except NONE or CLARIFICATION REQUIRED with numbered questions.\n\n' +
+      '- Do not write anything except NONE or the JSON object.\n\n' +
       `USER INPUT:\n${topic}`
   }, opts?.timeoutMs ? { requestTimeoutMs: opts.timeoutMs, headersTimeoutMs: opts.timeoutMs, bodyTimeoutMs: opts.timeoutMs } : undefined);
   const parsed = parseRefinementOutput(extractOutputText(data));

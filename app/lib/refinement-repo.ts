@@ -5,6 +5,7 @@ export type RefinementQuestionRecord = {
   session_id: string;
   sequence: number;
   question_text: string;
+  options_json: unknown | null;
   answer_text: string | null;
   answered_at: string | null;
   is_complete: boolean;
@@ -12,14 +13,14 @@ export type RefinementQuestionRecord = {
 
 export async function createQuestions(params: {
   sessionId: string;
-  questions: string[];
+  questions: Array<{ question: string; options: string[] }>;
 }) {
   const inserts = params.questions.map((question, index) =>
     query(
-      `INSERT INTO refinement_questions (session_id, sequence, question_text)
-       VALUES ($1, $2, $3)
+      `INSERT INTO refinement_questions (session_id, sequence, question_text, options_json)
+       VALUES ($1, $2, $3, $4::jsonb)
        ON CONFLICT (session_id, sequence) DO NOTHING`,
-      [params.sessionId, index + 1, question]
+      [params.sessionId, index + 1, question.question, JSON.stringify(question.options ?? [])]
     )
   );
 
