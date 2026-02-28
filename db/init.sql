@@ -32,11 +32,15 @@ CREATE TABLE IF NOT EXISTS refinement_questions (
   session_id uuid NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
   sequence int NOT NULL,
   question_text text NOT NULL,
+  options_json jsonb,
   answer_text text,
   answered_at timestamptz,
   is_complete boolean NOT NULL DEFAULT false,
   UNIQUE (session_id, sequence)
 );
+
+ALTER TABLE refinement_questions
+  ADD COLUMN IF NOT EXISTS options_json jsonb;
 
 CREATE TABLE IF NOT EXISTS provider_results (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

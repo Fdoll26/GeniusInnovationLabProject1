@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS refinement_questions (
   session_id uuid NOT NULL REFERENCES research_sessions(id) ON DELETE CASCADE,
   sequence int NOT NULL,
   question_text text NOT NULL,
+  options_json jsonb,
   answer_text text,
   answered_at timestamptz,
   is_complete boolean NOT NULL DEFAULT false,

@@ -697,6 +697,33 @@ button:disabled {
   gap: 8px;
 }
 
+.clarify-plan__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.clarify-plan__option-chip {
+  background: var(--card);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.2;
+  box-shadow: none;
+}
+
+.clarify-plan__option-chip:hover {
+  border-color: color-mix(in srgb, var(--brand) 40%, var(--border));
+}
+
+.clarify-plan__option-chip.is-selected {
+  background: var(--brand-soft);
+  border-color: color-mix(in srgb, var(--brand) 70%, var(--border));
+  color: var(--brand-ink);
+}
+
 .clarify-plan__question-content label {
   font-size: 14px;
   font-weight: 600;
