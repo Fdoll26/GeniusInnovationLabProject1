@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import LoadingBar from './LoadingBar';
 
 type RefinementQuestion = {
   id: string;
@@ -78,9 +79,7 @@ export default function RefinementPanel({ sessionId }: { sessionId: string | nul
             <span className="spinner" aria-hidden />
             <span>Loading refinement...</span>
           </div>
-          <div className="progress-bar" aria-hidden>
-            <div className="progress-bar__fill" />
-          </div>
+          <LoadingBar />
         </div>
       </div>
     );
@@ -181,42 +180,96 @@ export default function RefinementPanel({ sessionId }: { sessionId: string | nul
             <span className="spinner" aria-hidden />
             <span>Generating clarification questions...</span>
           </div>
-          <div className="progress-bar" aria-hidden>
-            <div className="progress-bar__fill" />
-          </div>
+          <LoadingBar />
         </div>
       ) : null}
       {nextQuestion ? (
         <>
-          <p>{nextQuestion.question_text}</p>
-          <textarea
-            value={answer}
-            onChange={(event) => setAnswer(event.target.value)}
-            rows={4}
-            disabled={submitting || isWaitingForQuestions}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault();
-                if (answer.trim() && !submitting) {
-                  submitAnswer();
-                }
-              }
-            }}
-          />
-          <div className="row">
-            <button
-              type="button"
-              onClick={submitAnswer}
-              disabled={submitting || isWaitingForQuestions || !answer.trim()}
-            >
-              Submit answer
-            </button>
-            {submitting ? (
-              <div className="status-row" aria-live="polite">
-                <span className="spinner" aria-hidden />
-                <span>Saving...</span>
+          <div className="clarify-plan stack">
+            <div className="clarify-plan__header">
+              <div className="clarify-plan__step-box" aria-hidden>
+                <span>1</span>
               </div>
-            ) : null}
+              <div className="clarify-plan__title-wrap">
+                <strong>Research Plan</strong>
+                <small className="muted">Answer these questions to refine your research</small>
+              </div>
+            </div>
+
+            <div className="clarify-plan__topic">
+              <p>
+                <strong>Topic:</strong> {detail.session.topic}
+              </p>
+            </div>
+
+            <div className="clarify-plan__questions">
+              {detail.refinementQuestions.map((question, index) => {
+                const isCurrent = question.id === nextQuestion.id;
+                const displayValue = isCurrent ? answer : (question.answer_text ?? '');
+
+                return (
+                  <div key={question.id} className="clarify-plan__question-row">
+                    <div className="clarify-plan__question-index" aria-hidden>
+                      {index + 1}
+                    </div>
+                    <div className="clarify-plan__question-content">
+                      <label>{question.question_text}</label>
+                      <textarea
+                        value={displayValue}
+                        onChange={(event) => {
+                          if (isCurrent) {
+                            setAnswer(event.target.value);
+                          }
+                        }}
+                        rows={3}
+                        disabled={!isCurrent || submitting || isWaitingForQuestions}
+                        placeholder={isCurrent ? 'Type your answer...' : ''}
+                        onKeyDown={(event) => {
+                          if (!isCurrent) return;
+                          if (event.key === 'Enter' && !event.shiftKey) {
+                            event.preventDefault();
+                            if (answer.trim() && !submitting) {
+                              submitAnswer();
+                            }
+                          }
+                        }}
+                      />
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="clarify-plan__next">
+              <div className="clarify-plan__next-row">
+                <div className="clarify-plan__next-step" aria-hidden>
+                  <span>2</span>
+                </div>
+                <span>Deep Research</span>
+              </div>
+              <div className="clarify-plan__next-row">
+                <div className="clarify-plan__next-step" aria-hidden>
+                  <span>3</span>
+                </div>
+                <span>Generate Report</span>
+              </div>
+            </div>
+
+            <div className="clarify-plan__actions">
+              <button
+                type="button"
+                onClick={submitAnswer}
+                disabled={submitting || isWaitingForQuestions || !answer.trim()}
+              >
+                Submit answer
+              </button>
+              {submitting ? (
+                <div className="status-row" aria-live="polite">
+                  <span className="spinner" aria-hidden />
+                  <span>Saving...</span>
+                </div>
+              ) : null}
+            </div>
           </div>
         </>
       ) : (
@@ -249,9 +302,7 @@ export default function RefinementPanel({ sessionId }: { sessionId: string | nul
                 <span className="spinner" aria-hidden />
                 <span>Submitting...</span>
               </div>
-              <div className="progress-bar" aria-hidden>
-                <div className="progress-bar__fill" />
-              </div>
+              <LoadingBar />
             </div>
           ) : null}
         </>

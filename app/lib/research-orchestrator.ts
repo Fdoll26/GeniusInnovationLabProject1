@@ -107,7 +107,7 @@ function isHardQuotaExhaustionError(error: unknown): boolean {
 }
 
 const MAX_RETRYABLE_STEP_ERRORS = Number.parseInt(process.env.RESEARCH_STEP_MAX_RETRYABLE_ERRORS ?? '3', 10);
-const MAX_GAP_CHECK_RETRIES = 2;
+const MAX_GAP_CHECK_ATTEMPTS = 2;
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -175,8 +175,9 @@ async function executePlannedStep(params: {
   currentIndex: number;
   totalSteps: number;
   gapLoops: number;
+  gapCheckAttempts: number;
 }) {
-  const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps, gapLoops } = params;
+  const { runId, run, settings, providerCfg, stepId, currentIndex, totalSteps, gapLoops, gapCheckAttempts } = params;
   const existingSteps = await listResearchSteps(runId);
   const runStartedAt =
     existingSteps
@@ -204,7 +205,8 @@ async function executePlannedStep(params: {
       step_index: currentIndex,
       total_steps: totalSteps,
       step_label: STEP_LABELS[stepId],
-      gap_loops: gapLoops
+      gap_loops: gapLoops,
+      gap_check_attempts: gapCheckAttempts
     }
   });
 
@@ -369,7 +371,8 @@ export async function startRun(params: {
       step_index: 0,
       total_steps: plannedStepCount,
       step_label: null,
-      gap_loops: 0
+      gap_loops: 0,
+      gap_check_attempts: 0
     }
   });
 
@@ -421,7 +424,14 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
   const progress = parseJson<Record<string, unknown>>(run.progress_json, {});
   const gapLoopsRaw = Number(progress.gap_loops ?? 0);
   const gapLoops = Number.isFinite(gapLoopsRaw) && gapLoopsRaw > 0 ? Math.trunc(gapLoopsRaw) : 0;
-  const maxGapLoops = Math.max(0, Math.min(providerCfg.max_gap_loops, MAX_GAP_CHECK_RETRIES));
+  const gapCheckAttemptsRaw = Number(progress.gap_check_attempts ?? 0);
+  const gapCheckAttempts =
+    Number.isFinite(gapCheckAttemptsRaw) && gapCheckAttemptsRaw > 0
+      ? Math.trunc(gapCheckAttemptsRaw)
+      : gapLoops > 0
+        ? gapLoops + 1
+        : 0;
+  const maxGapCheckAttempts = Math.max(1, Math.min(providerCfg.max_gap_loops + 1, MAX_GAP_CHECK_ATTEMPTS));
 
   let currentIndex = clamp(run.current_step_index, 0, totalSteps);
   if (currentIndex >= totalSteps) {
@@ -444,7 +454,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
           step_index: currentIndex - 1,
           total_steps: totalSteps,
           step_label: STEP_LABELS[executionSteps[currentIndex - 1]],
-          gap_loops: gapLoops
+          gap_loops: gapLoops,
+          gap_check_attempts: gapCheckAttempts
         }
       });
       return { state: 'IN_PROGRESS', done: false };
@@ -469,7 +480,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         step_index: currentIndex,
         total_steps: totalSteps,
         step_label: currentIndex < totalSteps ? STEP_LABELS[executionSteps[currentIndex]] : null,
-        gap_loops: gapLoops
+        gap_loops: gapLoops,
+        gap_check_attempts: gapCheckAttempts
       }
     });
     if (currentIndex >= totalSteps) {
@@ -488,7 +500,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
       stepId,
       currentIndex,
       totalSteps,
-      gapLoops
+      gapLoops,
+      gapCheckAttempts
     });
     const artifact = execution.artifact;
     const synthesizedText = (artifact.output_text_with_refs ?? artifact.raw_output_text ?? '').trim();
@@ -500,7 +513,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
 
     if (stepId === 'GAP_CHECK' && artifact.structured_output) {
       const severe = Boolean((artifact.structured_output as Record<string, unknown>).severe_gaps);
-      if (severe && gapLoops < maxGapLoops) {
+      const nextGapCheckAttempts = gapCheckAttempts + 1;
+      if (severe && nextGapCheckAttempts < maxGapCheckAttempts) {
         const loopBackIndex = 1;
         await resetStepsFromIndex({
           runId,
@@ -516,7 +530,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
             step_index: loopBackIndex,
             total_steps: totalSteps,
             step_label: STEP_LABELS[executionSteps[loopBackIndex]],
-            gap_loops: gapLoops + 1
+            gap_loops: gapLoops + 1,
+            gap_check_attempts: nextGapCheckAttempts
           }
         });
         return { state: 'IN_PROGRESS', done: false };
@@ -549,7 +564,8 @@ export async function tick(runId: string): Promise<{ state: string; done: boolea
         step_index: nextIndex,
         total_steps: totalSteps,
         step_label: isDone ? null : STEP_LABELS[executionSteps[nextIndex]],
-        gap_loops: gapLoops
+        gap_loops: gapLoops,
+        gap_check_attempts: stepId === 'GAP_CHECK' ? gapCheckAttempts + 1 : gapCheckAttempts
       },
       state: isDone ? 'DONE' : 'IN_PROGRESS',
       synthesizedReportMd: stepId === 'SECTION_SYNTHESIS' ? synthesizedText : undefined,
